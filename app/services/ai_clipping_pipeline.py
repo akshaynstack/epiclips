@@ -459,29 +459,28 @@ class AIClippingPipeline:
                 avg_face_area = sum(face_areas) / len(face_areas)
                 avg_face_size = int(avg_face_area ** 0.5)
 
-                # Create tight crop: 2x face size (matching epiriumaiclips)
-                # with floor of 1/3 of min dimension
-                face_crop_size = max(avg_face_size * 2, min(source_width, source_height) // 3)
+                # Create TIGHT crop: 2x face size (matching epiriumaiclips)
+                # This smaller crop will scale UP dramatically to fill the bottom region
+                face_crop_size = avg_face_size * 2
 
-                # Make window square-ish based on face crop, then adjust for aspect
+                # Ensure minimum reasonable size (face + context)
+                min_crop = min(source_width, source_height) // 4  # 1/4 of frame
+                face_crop_size = max(face_crop_size, min_crop)
+
+                # Cap at 1/3 of source to ensure good scale-up
+                max_crop = min(source_width, source_height) // 3
+                face_crop_size = min(face_crop_size, max_crop)
+
+                # Make window square for best scaling
                 window_height = face_crop_size
-                window_width = int(window_height * face_crop_aspect)
+                window_width = face_crop_size  # Keep square for clean scale-up
 
-                # Ensure minimum size
-                window_width = max(window_width, 200)
-                window_height = max(window_height, 200)
-
-                # Cap at 50% of source (like epiriumaiclips fallback)
-                window_height = min(window_height, source_height // 2)
-                window_width = min(window_width, int(window_height * face_crop_aspect))
-
-                logger.info(f"Face crop (epiriumaiclips style): avg_face_size={avg_face_size}, window={window_width}x{window_height}")
+                logger.info(f"Face crop (tight): avg_face_size={avg_face_size}, crop={face_crop_size}x{face_crop_size}")
             else:
-                # Fallback: center-bottom crop (matching epiriumaiclips)
-                # Use bottom 50% of height, middle portion of width
-                window_height = source_height // 2
-                window_width = int(window_height * face_crop_aspect)
-                window_width = min(window_width, source_width // 2)
+                # Fallback: smaller crop from center-bottom for better scale-up
+                # Use 1/3 of height to ensure it scales up to fill
+                window_height = source_height // 3
+                window_width = window_height  # Keep square
                 logger.info(f"No faces - using center-bottom fallback: window={window_width}x{window_height}")
         else:
             # For talking_head: standard 9:16 crop

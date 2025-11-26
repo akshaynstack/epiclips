@@ -97,10 +97,9 @@ class Settings(BaseSettings):
     stack_screen_height_ratio: float = 0.55  # Screen takes top 55%
     stack_face_height_ratio: float = 0.45    # Face takes bottom 45%
     
-    # OpusClip-Style Layout (screen top, captions middle, face bottom)
-    opusclip_screen_ratio: float = 0.45      # Screen content: 45%
-    opusclip_caption_ratio: float = 0.12     # Caption band: 12%
-    opusclip_face_ratio: float = 0.43        # Speaker face: 43%
+    # OpusClip-Style Layout (screen top, face bottom, captions overlaid)
+    opusclip_screen_ratio: float = 0.50      # Screen content: 50% (top)
+    opusclip_face_ratio: float = 0.50        # Speaker face: 50% (bottom)
     use_opusclip_layout: bool = True         # Enable OpusClip-style layout for screen_share
     
     # Camera Physics (mass-spring-damper smoothing)

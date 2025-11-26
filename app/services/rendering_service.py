@@ -178,40 +178,35 @@ class RenderingService:
         duration_ms: int,
     ) -> None:
         """
-        Render OpusClip-style layout with 3 regions.
-        
+        Render OpusClip-style layout with 2 regions and overlaid captions.
+
         Layout (top to bottom):
-        - Screen content: 45% (top)
-        - Caption band: 12% (middle) - black background with styled captions
-        - Speaker face: 43% (bottom) - tight face-centered crop
-        
+        - Screen content: 50% (top)
+        - Speaker face: 50% (bottom) - tight face-centered crop
+        - Captions: Overlaid on top of combined video (no black band)
+
         Based on epiriumaiclips architecture for professional results.
         """
         face_timeline = request.primary_timeline  # Face tracking
         screen_timeline = request.secondary_timeline  # Screen content
         assert face_timeline and screen_timeline
-        
-        # Calculate region heights based on OpusClip ratios
+
+        # Calculate region heights based on OpusClip ratios (2 regions, no caption band)
         total_height = self.settings.target_output_height
         screen_height = int(total_height * self.settings.opusclip_screen_ratio)
-        caption_height = int(total_height * self.settings.opusclip_caption_ratio)
-        face_height = int(total_height * self.settings.opusclip_face_ratio)
-        
-        # Adjust for any rounding to ensure we hit exact target height
-        face_height = total_height - screen_height - caption_height
-        
+        face_height = total_height - screen_height  # Remaining space for face
+
         logger.info(
-            f"OpusClip mode render: screen={screen_height}px, caption={caption_height}px, face={face_height}px"
+            f"OpusClip mode render: screen={screen_height}px, face={face_height}px (captions overlaid)"
         )
-        
+
         output_dir = os.path.dirname(request.output_path)
         timestamp = os.path.basename(request.output_path).replace(".mp4", "")
         temp_screen_path = os.path.join(output_dir, f"temp_screen_{timestamp}.mp4")
         temp_face_path = os.path.join(output_dir, f"temp_face_{timestamp}.mp4")
-        temp_caption_band_path = os.path.join(output_dir, f"temp_caption_{timestamp}.mp4")
-        
+
         try:
-            # Pass 1: Render screen content (TOP 45%)
+            # Pass 1: Render screen content (TOP 50%)
             # Square center crop, scaled to fill full width
             logger.debug("Pass 1: Rendering screen content (top)...")
             await self._render_opusclip_screen(
@@ -223,8 +218,8 @@ class RenderingService:
                 start_time_ms=request.start_time_ms,
                 duration_ms=duration_ms,
             )
-            
-            # Pass 2: Render tight face crop (BOTTOM 43%)
+
+            # Pass 2: Render tight face crop (BOTTOM 50%)
             logger.debug("Pass 2: Rendering face crop (bottom)...")
             await self._render_opusclip_face(
                 input_path=request.video_path,
@@ -235,33 +230,22 @@ class RenderingService:
                 start_time_ms=request.start_time_ms,
                 duration_ms=duration_ms,
             )
-            
-            # Pass 3: Create caption band (MIDDLE 12%)
-            # Black background with captions positioned in this band
-            logger.debug("Pass 3: Creating caption band (middle)...")
-            await self._render_caption_band(
-                output_path=temp_caption_band_path,
-                target_width=self.settings.target_output_width,
-                target_height=caption_height,
-                duration_ms=duration_ms,
-                caption_path=caption_path,
-            )
-            
-            # Pass 4: Merge all 3 regions with vstack
-            logger.debug("Pass 4: Merging 3 regions...")
-            await self._vstack_opusclip(
+
+            # Pass 3: Merge 2 regions with vstack and overlay captions
+            logger.debug("Pass 3: Merging 2 regions with captions overlaid...")
+            await self._vstack_opusclip_with_overlay(
                 screen_path=temp_screen_path,
-                caption_path=temp_caption_band_path,
                 face_path=temp_face_path,
                 output_path=request.output_path,
+                caption_path=caption_path,
                 original_video_path=request.video_path,
                 start_time_ms=request.start_time_ms,
                 duration_ms=duration_ms,
             )
-            
+
         finally:
             # Cleanup temp files
-            for path in [temp_screen_path, temp_face_path, temp_caption_band_path]:
+            for path in [temp_screen_path, temp_face_path]:
                 if os.path.isfile(path):
                     try:
                         os.remove(path)
@@ -330,52 +314,55 @@ class RenderingService:
     ) -> None:
         """
         Render tight face crop for OpusClip layout (speaker region).
-        
-        Following epiriumaiclips approach: Create a TIGHT SQUARE crop around 
-        the detected face position, then scale UP to fill the bottom region.
-        This creates a close-up portrait view of the speaker.
+
+        Following epiriumaiclips approach: Create a TIGHT SQUARE crop around
+        the detected face position, then scale UP dramatically to fill the
+        bottom region. This creates a close-up portrait view of the speaker.
         """
         keyframes = timeline.keyframes
-        
+
         # Calculate weighted average position from keyframes (face center)
         avg_center_x = sum(k.center_x for k in keyframes) / len(keyframes)
         avg_center_y = sum(k.center_y for k in keyframes) / len(keyframes)
-        
+
         source_w = timeline.source_width
         source_h = timeline.source_height
-        
-        # Use the window dimensions from timeline - these are calculated based on
-        # actual detected face size in the pipeline (2x face size, matching epiriumaiclips)
-        # Make it a square crop for best scaling
+
+        # Use the window dimensions from timeline (tight crop calculated in pipeline)
         crop_size = max(timeline.window_width, timeline.window_height)
-        
+
         # Ensure minimum size for quality
-        crop_size = max(crop_size, 200)
-        
+        crop_size = max(crop_size, 150)
+
         # Ensure crop doesn't exceed source dimensions
         crop_size = min(crop_size, min(source_w, source_h))
-        
+
         # Center the square crop on the face position
         max_x = source_w - crop_size
         max_y = source_h - crop_size
-        
+
         crop_x = max(0, min(max_x, int(avg_center_x - crop_size / 2)))
         crop_y = max(0, min(max_y, int(avg_center_y - crop_size / 2)))
-        
+
+        # Calculate scale factor needed to fill target width
+        scale_factor = target_width / crop_size
+        scaled_height = int(crop_size * scale_factor)
+
         logger.info(
-            f"OpusClip FACE crop: square {crop_size}x{crop_size} around face "
-            f"at ({crop_x}, {crop_y}) centered on ({avg_center_x:.0f}, {avg_center_y:.0f}) "
-            f"-> scale UP to {target_width}x{target_height}"
+            f"OpusClip FACE crop: {crop_size}x{crop_size} at ({crop_x}, {crop_y}) "
+            f"-> scale {scale_factor:.2f}x to {target_width}x{scaled_height} "
+            f"-> crop to {target_width}x{target_height}"
         )
-        
+
         # Crop tight square around face, scale UP to fill target width,
-        # then crop height to fit target dimensions
+        # then crop height from CENTER to fit target dimensions
+        # Using force_original_aspect_ratio=increase ensures we ALWAYS fill width
         filters = [
             f"crop={crop_size}:{crop_size}:{crop_x}:{crop_y}",
-            f"scale={target_width}:-1",  # Scale to target width (will be larger than target height)
-            f"crop={target_width}:{target_height}:0:(ih-{target_height})/2",  # Center crop to target height
+            f"scale={target_width}:{target_width}:force_original_aspect_ratio=increase",
+            f"crop={target_width}:{target_height}:(iw-{target_width})/2:(ih-{target_height})/2",
         ]
-        
+
         await self._run_ffmpeg(
             input_path=input_path,
             output_path=output_path,
@@ -486,35 +473,39 @@ class RenderingService:
             import shutil
             shutil.copy(source_ass, output_ass)
 
-    async def _vstack_opusclip(
+    async def _vstack_opusclip_with_overlay(
         self,
         screen_path: str,
-        caption_path: str,
         face_path: str,
         output_path: str,
+        caption_path: Optional[str],
         original_video_path: str,
         start_time_ms: int,
         duration_ms: int,
     ) -> None:
-        """Merge 3 regions vertically for OpusClip layout."""
+        """Merge 2 regions vertically and overlay captions on the combined video."""
         start_sec = start_time_ms / 1000
         duration_sec = duration_ms / 1000
-        
-        # Build filter complex for 3-way vstack
-        filter_complex = "[0:v][1:v][2:v]vstack=inputs=3[out]"
-        
+
+        # Build filter complex for 2-way vstack with optional caption overlay
+        use_captions = caption_path and os.path.isfile(caption_path)
+        if use_captions:
+            # Stack screen and face, then overlay captions on the result
+            filter_complex = f"[0:v][1:v]vstack=inputs=2[stacked];[stacked]ass={self._escape_filter_path(caption_path)}[out]"
+        else:
+            filter_complex = "[0:v][1:v]vstack=inputs=2[out]"
+
         cmd = [
             "ffmpeg",
             "-y",
             "-i", screen_path,    # Input 0: screen (top)
-            "-i", caption_path,   # Input 1: caption band (middle)
-            "-i", face_path,      # Input 2: face (bottom)
+            "-i", face_path,      # Input 1: face (bottom)
             "-ss", str(start_sec),
             "-t", str(duration_sec),
-            "-i", original_video_path,  # Input 3: original for audio
+            "-i", original_video_path,  # Input 2: original for audio
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-map", "3:a?",  # Audio from original video
+            "-map", "2:a?",  # Audio from original video
             "-c:v", "libx264",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -524,7 +515,7 @@ class RenderingService:
             "-shortest",
             output_path,
         ]
-        
+
         await self._run_cmd(cmd)
 
     async def _render_focus_mode(
