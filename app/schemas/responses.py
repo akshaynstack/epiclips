@@ -236,3 +236,5 @@ class ReadinessResponse(BaseModel):
     face_detector: str = Field(..., description="Face detector status")
     pose_estimator: str = Field(..., description="Pose estimator status")
 
+
+

@@ -3,6 +3,10 @@
 # =============================================================================
 # Stage 1: Build stage - Install dependencies and download models
 # Stage 2: Runtime stage - Minimal image for production
+#
+# This service provides:
+# - Video detection (YOLO, MediaPipe, DeepSORT)
+# - Full AI clipping pipeline (transcription, intelligence, rendering)
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -16,6 +20,7 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
@@ -36,8 +41,8 @@ FROM python:3.11-slim AS runtime
 
 # Labels
 LABEL maintainer="ViewCreator"
-LABEL description="Video detection worker with YOLO and MediaPipe"
-LABEL version="1.0.0"
+LABEL description="AI-powered video clipping worker with transcription, intelligence, and rendering"
+LABEL version="2.0.0"
 
 # Environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -48,11 +53,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TEMP_DIRECTORY=/tmp/clipping-worker \
     YOLO_MODEL_PATH=/app/models/yolov8n.pt \
     # Disable MediaPipe GPU (use CPU)
-    MEDIAPIPE_DISABLE_GPU=1
+    MEDIAPIPE_DISABLE_GPU=1 \
+    # yt-dlp config
+    YTDLP_NO_UPDATE=1
 
 WORKDIR $APP_HOME
 
-    # Install runtime dependencies
+# Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # FFmpeg for video processing
     ffmpeg \
@@ -65,8 +72,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     # For healthcheck
     curl \
+    # Fonts for caption rendering (viral-style subtitles)
+    fonts-dejavu-core \
+    fonts-liberation \
+    fontconfig \
+    # yt-dlp dependencies
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && apt-get clean \
+    # Refresh font cache for caption rendering
+    && fc-cache -fv
+
+# Install yt-dlp binary (standalone, doesn't require Python dependencies)
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser

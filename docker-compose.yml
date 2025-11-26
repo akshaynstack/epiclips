@@ -28,6 +28,20 @@ services:
       - POSE_CONFIDENCE_THRESHOLD=0.5
       - TRACKING_MAX_AGE=30
       
+      # AI Services Configuration
+      # Transcription (Groq Whisper)
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      
+      # Intelligence Planning (Gemini via OpenRouter)
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - INTELLIGENCE_MODEL=${INTELLIGENCE_MODEL:-google/gemini-2.0-flash-001}
+      
+      # Rendering Configuration
+      - TARGET_OUTPUT_WIDTH=1080
+      - TARGET_OUTPUT_HEIGHT=1920
+      - FFMPEG_PRESET=medium
+      - FFMPEG_CRF=23
+      
       # Logging
       - LOG_LEVEL=INFO
       - DEBUG=false
@@ -40,14 +54,15 @@ services:
       # - ./app:/app/app:ro
     
     # Resource limits (adjust based on your needs)
+    # Note: AI clipping requires more resources than detection alone
     deploy:
       resources:
         limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
           cpus: '2'
           memory: 4G
-        reservations:
-          cpus: '1'
-          memory: 2G
     
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

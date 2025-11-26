@@ -59,3 +59,5 @@ class DetectionStatusRequest(BaseModel):
 
     job_id: str = Field(..., description="Job ID to check status for")
 
+
+

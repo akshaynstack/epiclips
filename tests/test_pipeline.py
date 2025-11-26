@@ -268,3 +268,5 @@ class TestEndToEnd:
             assert 0.0 <= x <= 1.0, f"{name} x coordinate out of range"
             assert 0.0 <= y <= 1.0, f"{name} y coordinate out of range"
 
+
+

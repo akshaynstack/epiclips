@@ -81,12 +81,172 @@ class DetectionPipeline:
 
     async def process_video(
         self,
+        video_path: str = None,
+        job_id: str = None,
+        video_s3_key: str = None,
+        config: PipelineConfig = None,
+        start_time_ms: int = None,
+        end_time_ms: int = None,
+        frame_interval_seconds: float = None,
+    ) -> dict:
+        """
+        Process a video through the full detection pipeline.
+        
+        This method supports two calling patterns:
+        1. S3-based: process_video(job_id, video_s3_key, config)
+        2. Local: process_video(video_path, start_time_ms, end_time_ms, frame_interval_seconds)
+        
+        Args:
+            video_path: Path to local video file (for local processing)
+            job_id: Unique job identifier (for S3 processing)
+            video_s3_key: S3 key of the source video (for S3 processing)
+            config: Pipeline configuration (for S3 processing)
+            start_time_ms: Start time in ms (for local processing)
+            end_time_ms: End time in ms (for local processing)
+            frame_interval_seconds: Frame sampling interval (for local processing)
+            
+        Returns:
+            Detection results (DetectionResponse for S3, dict for local)
+        """
+        # Detect calling pattern
+        if video_path is not None and start_time_ms is not None:
+            # Local video processing pattern
+            return await self._process_local_video(
+                video_path=video_path,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                frame_interval_seconds=frame_interval_seconds or 0.5,
+            )
+        
+        # Fall through to original S3-based processing
+        return await self._process_s3_video(job_id, video_s3_key, config)
+
+    async def _process_local_video(
+        self,
+        video_path: str,
+        start_time_ms: int,
+        end_time_ms: int,
+        frame_interval_seconds: float,
+    ) -> dict:
+        """
+        Process a local video file for face detection.
+        
+        Uses multi-tier detection (MediaPipe → YOLO → Haar) with outlier filtering
+        for robust face tracking based on epiriumaiclips architecture.
+        
+        Returns a dict with 'frames' containing detection data.
+        """
+        start_time = time.time()
+        
+        try:
+            # Open video
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                logger.error(f"Failed to open video: {video_path}")
+                return {"frames": []}
+            
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration_sec = total_frames / fps if fps > 0 else 0
+            
+            # Calculate frame positions to sample
+            start_sec = start_time_ms / 1000
+            end_sec = end_time_ms / 1000
+            
+            frames_data = []
+            all_raw_detections = []  # For cross-frame outlier filtering
+            current_time = start_sec
+            
+            logger.info(f"Processing local video: {start_sec:.1f}s - {end_sec:.1f}s, interval={frame_interval_seconds}s")
+            
+            while current_time < end_sec:
+                # Seek to position
+                frame_pos = int(current_time * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                
+                ret, frame = cap.read()
+                if not ret:
+                    current_time += frame_interval_seconds
+                    continue
+                
+                # Run face detection with multi-tier fallback
+                face_detections = []
+                raw_detections = []
+                try:
+                    face_result = self.face_detector.detect_faces(
+                        frame,
+                        frame_index=frame_pos,
+                        timestamp_ms=int(current_time * 1000),
+                    )
+                    if face_result and face_result.detections:
+                        raw_detections = face_result.detections
+                        
+                        # Convert to dict format for frame data
+                        for det in raw_detections:
+                            bbox = det.bbox
+                            face_detections.append({
+                                "bbox": {
+                                    "x": bbox[0],
+                                    "y": bbox[1],
+                                    "width": bbox[2],
+                                    "height": bbox[3],
+                                },
+                                "confidence": det.confidence,
+                                "detection_method": det.detection_method,
+                            })
+                            
+                except Exception as e:
+                    logger.warning(f"Face detection failed at {current_time:.1f}s: {e}")
+                
+                # Store for cross-frame outlier filtering
+                all_raw_detections.extend(raw_detections)
+                
+                frames_data.append({
+                    "timestamp_sec": current_time,
+                    "frame_index": frame_pos,
+                    "detections": face_detections,
+                })
+                
+                current_time += frame_interval_seconds
+            
+            cap.release()
+            
+            # Apply cross-frame outlier filtering
+            # This removes false positive detections that are far from the main cluster
+            if all_raw_detections and len(all_raw_detections) >= 3:
+                filtered_detections = self.face_detector.filter_outliers(all_raw_detections)
+                
+                if len(filtered_detections) < len(all_raw_detections):
+                    logger.info(f"Outlier filtering: {len(all_raw_detections)} -> {len(filtered_detections)} detections")
+                    
+                    # Build set of valid bbox tuples for quick lookup
+                    valid_bboxes = set(det.bbox for det in filtered_detections)
+                    
+                    # Filter frames data to only include valid detections
+                    for frame_data in frames_data:
+                        frame_data["detections"] = [
+                            d for d in frame_data["detections"]
+                            if (d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["width"], d["bbox"]["height"]) in valid_bboxes
+                        ]
+            
+            processing_time = time.time() - start_time
+            total_faces = sum(len(f['detections']) for f in frames_data)
+            logger.info(f"Local video detection complete: {len(frames_data)} frames, {total_faces} faces, {processing_time:.1f}s")
+            
+            return {"frames": frames_data}
+            
+        except Exception as e:
+            logger.error(f"Local video processing failed: {e}", exc_info=True)
+            return {"frames": []}
+
+    async def _process_s3_video(
+        self,
         job_id: str,
         video_s3_key: str,
         config: PipelineConfig,
     ) -> DetectionResponse:
         """
-        Process a video through the full detection pipeline.
+        Process a video from S3 through the full detection pipeline.
         
         Args:
             job_id: Unique job identifier
@@ -347,4 +507,6 @@ class DetectionPipeline:
             return f"{base_path}/detection/{job_id}.json"
         
         return f"detection/{job_id}.json"
+
+
 

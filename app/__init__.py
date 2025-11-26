@@ -6,3 +6,5 @@ A FastAPI-based detection service for video analysis using YOLO, MediaPipe, and 
 
 __version__ = "1.0.0"
 
+
+
