@@ -1,0 +1,83 @@
+services:
+  clipping-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: viewcreator-clipping-worker
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env  # Load from .env file
+    environment:
+      # AWS Configuration (use your credentials)
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - S3_BUCKET=${S3_BUCKET:-viewcreator-media}
+      
+      # Model Configuration
+      - YOLO_MODEL_PATH=/app/models/yolov8n.pt
+      
+      # Processing Settings
+      - FRAME_INTERVAL_SECONDS=2.0
+      - MAX_CONCURRENT_JOBS=2
+      - TEMP_DIRECTORY=/tmp/clipping-worker
+      
+      # Detection Thresholds
+      - FACE_CONFIDENCE_THRESHOLD=0.5
+      - POSE_CONFIDENCE_THRESHOLD=0.5
+      - TRACKING_MAX_AGE=30
+      
+      # Logging
+      - LOG_LEVEL=INFO
+      - DEBUG=false
+    
+    volumes:
+      # Persistent temp storage (optional)
+      - clipping-worker-temp:/tmp/clipping-worker
+      # NOTE: For local development with hot-reload, uncomment the line below
+      # after adding this path to Docker Desktop's File Sharing settings
+      # - ./app:/app/app:ro
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    restart: unless-stopped
+
+  # Optional: LocalStack for S3 emulation in development
+  localstack:
+    image: localstack/localstack:latest
+    container_name: viewcreator-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEBUG=0
+      - DATA_DIR=/var/lib/localstack/data
+    volumes:
+      - localstack-data:/var/lib/localstack
+    profiles:
+      - localstack  # Only start with: docker-compose --profile localstack up
+
+volumes:
+  clipping-worker-temp:
+  localstack-data:
+
+networks:
+  default:
+    name: viewcreator-network
+
