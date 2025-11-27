@@ -100,10 +100,11 @@ class ClipArtifactResponse(BaseModel):
 
 class JobOutputResponse(BaseModel):
     """Response model for job output."""
-    
+
     job_id: str
     source_video_url: str
     source_video_title: str
+    source_video_duration_seconds: float  # Source video duration for credit calculation
     total_clips: int
     clips: list[ClipArtifactResponse]
     transcript_url: Optional[str] = None
@@ -358,6 +359,7 @@ async def get_job_status(job_id: str) -> ClipJobStatusResponse:
                 job_id=result.output.job_id,
                 source_video_url=result.output.source_video_url,
                 source_video_title=result.output.source_video_title,
+                source_video_duration_seconds=result.output.source_video_duration_seconds,
                 total_clips=result.output.total_clips,
                 clips=[
                     ClipArtifactResponse(

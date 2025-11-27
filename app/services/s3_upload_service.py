@@ -48,10 +48,11 @@ class ClipArtifact:
 @dataclass
 class JobOutput:
     """Complete output of an AI clipping job."""
-    
+
     job_id: str
     source_video_url: str
     source_video_title: str
+    source_video_duration_seconds: float  # Source video duration for credit calculation
     total_clips: int
     clips: list[ClipArtifact]
     user_id: Optional[str] = None  # User ID for S3 key scoping

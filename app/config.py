@@ -1,17 +1,19 @@
 """
 Configuration module using Pydantic Settings for environment variable management.
+
+Only essential environment variables are exposed. All other settings are hardcoded
+for consistency and simplicity.
 """
 
 from functools import lru_cache
 from typing import Literal, Optional
 
-from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
-class CaptionStyle(BaseSettings):
-    """Caption styling configuration."""
-    
+class CaptionStyle:
+    """Caption styling configuration (hardcoded)."""
+
     font_name: str = "Arial Black"
     font_size: int = 72
     primary_color: str = "#FFFFFF"
@@ -28,7 +30,16 @@ class CaptionStyle(BaseSettings):
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """
+    Application settings.
+
+    Only essential configuration is loaded from environment variables.
+    All processing/rendering settings are hardcoded for consistency.
+    """
+
+    # ============================================================
+    # ENVIRONMENT VARIABLES (minimal set)
+    # ============================================================
 
     # Application
     app_name: str = "viewcreator-clipping-worker"
@@ -41,81 +52,186 @@ class Settings(BaseSettings):
     aws_secret_access_key: Optional[str] = None
     s3_bucket: str = "viewcreator-media"
 
+    # API Keys (required)
+    groq_api_key: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
+
+    # ============================================================
+    # HARDCODED SETTINGS (not configurable via env vars)
+    # ============================================================
+
     # Model paths
-    yolo_model_path: str = "/app/models/yolov8n-face.pt"
-    yolo_model_name: str = "yolov8n-face.pt"
+    @property
+    def yolo_model_path(self) -> str:
+        return "/app/models/yolov8n.pt"
+
+    @property
+    def yolo_model_name(self) -> str:
+        return "yolov8n.pt"
 
     # Processing settings
-    frame_interval_seconds: float = 2.0
-    max_concurrent_jobs: int = 2
-    temp_directory: str = "/tmp/clipping-worker"
-    workspace_root: str = "/tmp/ai-clipping-agent"
+    @property
+    def frame_interval_seconds(self) -> float:
+        return 2.0
+
+    @property
+    def max_concurrent_jobs(self) -> int:
+        return 2
+
+    @property
+    def temp_directory(self) -> str:
+        return "/tmp/clipping-worker"
+
+    @property
+    def workspace_root(self) -> str:
+        return "/tmp/ai-clipping-agent"
 
     # Detection settings
-    face_confidence_threshold: float = 0.5
-    pose_confidence_threshold: float = 0.5
-    tracking_max_age: int = 30  # Frames before a track is deleted
+    @property
+    def face_confidence_threshold(self) -> float:
+        return 0.5
+
+    @property
+    def pose_confidence_threshold(self) -> float:
+        return 0.5
+
+    @property
+    def tracking_max_age(self) -> int:
+        return 30  # Frames before a track is deleted
 
     # API settings
-    api_timeout_seconds: int = 300
-    max_video_duration_seconds: int = 7200  # 2 hours max
+    @property
+    def api_timeout_seconds(self) -> int:
+        return 300
 
-    # ============================================================
-    # AI CLIPPING PIPELINE SETTINGS
-    # ============================================================
-    
+    @property
+    def max_video_duration_seconds(self) -> int:
+        return 14400  # 4 hours max (credit-guarded in API)
+
     # yt-dlp Configuration
-    ytdlp_path: str = Field(default="yt-dlp", description="Path to yt-dlp binary")
-    ytdlp_cookies_from_browser: Optional[str] = None
-    ytdlp_extra_args: str = ""  # Space-separated extra arguments
-    max_download_duration_seconds: int = 7200
+    @property
+    def ytdlp_path(self) -> str:
+        return "yt-dlp"
+
+    @property
+    def ytdlp_cookies_from_browser(self) -> Optional[str]:
+        return None
+
+    @property
+    def max_download_duration_seconds(self) -> int:
+        return 14400  # 4 hours max (credit-guarded in API)
 
     # Transcription Configuration (Groq Whisper)
-    groq_api_key: Optional[str] = None
-    transcription_model: str = "whisper-large-v3-turbo"
-    
-    # Chunk duration for long audio transcription (Groq supports 30 min chunks)
-    groq_chunk_duration_seconds: int = 1800
+    @property
+    def transcription_model(self) -> str:
+        return "whisper-large-v3-turbo"
+
+    @property
+    def groq_chunk_duration_seconds(self) -> int:
+        return 1800  # 30 minutes
 
     # OpenRouter / LLM Configuration
-    openrouter_api_key: Optional[str] = None
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    gemini_model: str = "google/gemini-2.5-flash"
-    qwen_model: str = "qwen/qwen-2.5-vl-72b-instruct"
-    
+    @property
+    def openrouter_base_url(self) -> str:
+        return "https://openrouter.ai/api/v1"
+
+    @property
+    def gemini_model(self) -> str:
+        return "google/gemini-2.5-flash"
+
     # Clip Planning Configuration
-    max_suggested_clips: int = 5
-    max_frames_per_vision_batch: int = 48
-    
+    @property
+    def max_suggested_clips(self) -> int:
+        return 5
+
+    @property
+    def max_frames_per_vision_batch(self) -> int:
+        return 48
+
     # Rendering Configuration
-    target_output_width: int = 1080
-    target_output_height: int = 1920
-    ffmpeg_preset: str = "veryfast"
-    ffmpeg_crf: int = 20
-    
-    # Stack Layout Configuration (screen on top, face on bottom)
-    stack_screen_height_ratio: float = 0.55  # Screen takes top 55%
-    stack_face_height_ratio: float = 0.45    # Face takes bottom 45%
-    
+    @property
+    def target_output_width(self) -> int:
+        return 1080
+
+    @property
+    def target_output_height(self) -> int:
+        return 1920
+
+    @property
+    def ffmpeg_preset(self) -> str:
+        return "veryfast"
+
+    @property
+    def ffmpeg_crf(self) -> int:
+        return 20
+
     # OpusClip-Style Layout (screen top, face bottom, captions overlaid)
-    opusclip_screen_ratio: float = 0.50      # Screen content: 50% (top)
-    opusclip_face_ratio: float = 0.50        # Speaker face: 50% (bottom)
-    use_opusclip_layout: bool = True         # Enable OpusClip-style layout for screen_share
-    
+    @property
+    def opusclip_screen_ratio(self) -> float:
+        return 0.50  # Screen content: 50% (top)
+
+    @property
+    def opusclip_face_ratio(self) -> float:
+        return 0.50  # Speaker face: 50% (bottom)
+
+    @property
+    def use_opusclip_layout(self) -> bool:
+        return True  # Enable OpusClip-style layout for screen_share
+
+    # Legacy Stack Layout (kept for fallback)
+    @property
+    def stack_screen_height_ratio(self) -> float:
+        return 0.55
+
+    @property
+    def stack_face_height_ratio(self) -> float:
+        return 0.45
+
     # Camera Physics (mass-spring-damper smoothing)
-    camera_mass: float = 1.0
-    camera_stiffness: float = 150.0
-    camera_damping: float = 20.0
-    
-    # Caption styling (can be overridden per-job)
-    caption_font_name: str = "Arial Black"
-    caption_font_size: int = 72
-    caption_primary_color: str = "#FFFFFF"
-    caption_highlight_color: str = "#FFD700"
-    caption_position: Literal["top", "center", "bottom"] = "center"
-    caption_max_words_per_line: int = 4
-    caption_word_by_word_highlight: bool = True
-    caption_uppercase: bool = True
+    @property
+    def camera_mass(self) -> float:
+        return 1.0
+
+    @property
+    def camera_stiffness(self) -> float:
+        return 150.0
+
+    @property
+    def camera_damping(self) -> float:
+        return 20.0
+
+    # Caption styling
+    @property
+    def caption_font_name(self) -> str:
+        return "Arial Black"
+
+    @property
+    def caption_font_size(self) -> int:
+        return 72
+
+    @property
+    def caption_primary_color(self) -> str:
+        return "#FFFFFF"
+
+    @property
+    def caption_highlight_color(self) -> str:
+        return "#FFD700"
+
+    @property
+    def caption_position(self) -> Literal["top", "center", "bottom"]:
+        return "center"
+
+    @property
+    def caption_max_words_per_line(self) -> int:
+        return 4
+
+    @property
+    def caption_word_by_word_highlight(self) -> bool:
+        return True
+
+    @property
+    def caption_uppercase(self) -> bool:
+        return True
 
     class Config:
         env_file = ".env"
@@ -124,28 +240,23 @@ class Settings(BaseSettings):
 
     def get_caption_style(self) -> CaptionStyle:
         """Build CaptionStyle from settings."""
-        return CaptionStyle(
-            font_name=self.caption_font_name,
-            font_size=self.caption_font_size,
-            primary_color=self.caption_primary_color,
-            highlight_color=self.caption_highlight_color,
-            position=self.caption_position,
-            max_words_per_line=self.caption_max_words_per_line,
-            word_by_word_highlight=self.caption_word_by_word_highlight,
-            uppercase=self.caption_uppercase,
-        )
-    
+        style = CaptionStyle()
+        style.font_name = self.caption_font_name
+        style.font_size = self.caption_font_size
+        style.primary_color = self.caption_primary_color
+        style.highlight_color = self.caption_highlight_color
+        style.position = self.caption_position
+        style.max_words_per_line = self.caption_max_words_per_line
+        style.word_by_word_highlight = self.caption_word_by_word_highlight
+        style.uppercase = self.caption_uppercase
+        return style
+
     def get_ytdlp_extra_args(self) -> list[str]:
-        """Parse yt-dlp extra arguments."""
-        if not self.ytdlp_extra_args:
-            return []
-        return [arg.strip() for arg in self.ytdlp_extra_args.split(" ") if arg.strip()]
+        """Parse yt-dlp extra arguments (none by default)."""
+        return []
 
 
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
-
-
-

@@ -34,11 +34,11 @@ The ViewCreator Clipping Worker is a specialized microservice that handles the c
 | Video Download | yt-dlp | Up to 50 MB/s |
 | Transcription | Groq Whisper | 216x realtime |
 | AI Planning | Gemini 2.5 Flash | ~2s per analysis |
-| Face Detection | YOLOv8n | 60+ FPS |
+| Face Detection | Multi-tier (MediaPipe + YOLO + Haar) | 60+ FPS with fallbacks |
 | Pose Estimation | MediaPipe | 30+ FPS |
 | Object Tracking | DeepSORT | Persistent IDs |
-| Video Rendering | FFmpeg H.264 | Hardware accel |
-| Caption Style | ASS Subtitles | Word-by-word highlight |
+| Video Rendering | FFmpeg H.264 (OpusClip-style) | 2-region split + overlay |
+| Caption Style | ASS Subtitles (overlay) | Word-by-word highlight |
 
 ---
 
@@ -215,10 +215,23 @@ Output: Detection frames with face/pose data per timestamp
 
 | Component | Model | Purpose |
 |-----------|-------|---------|
-| `FaceDetector` | YOLOv8n | Bounding boxes + confidence |
+| `FaceDetector` | Multi-tier fallback | Bounding boxes + confidence |
 | `PoseEstimator` | MediaPipe | 33 body keypoints |
 | `ObjectTracker` | DeepSORT | Persistent track IDs |
 | `FrameExtractor` | FFmpeg | Extract frames at intervals |
+
+**Face Detection Multi-Tier Fallback:**
+The face detector uses 4 backends in priority order for robust detection:
+
+| Tier | Model | Best For |
+|------|-------|----------|
+| 1 | MediaPipe FaceDetection (short-range) | Close-up faces, primary detector |
+| 2 | MediaPipe FaceDetection (full-range) | Small/distant faces (webcam overlays) |
+| 3 | YOLOv8n | General face detection fallback |
+| 4 | Haar Cascade | Final fallback for edge cases |
+
+- **MIN_FACE_AREA_RATIO**: 0.1% (allows ~45x45 face in 1080p)
+- **Confidence threshold**: 0.5 (primary), 0.3 (full-range fallback)
 
 **Detection Flow:**
 ```python
@@ -324,15 +337,15 @@ Output: CropTimeline (keyframes with center positions)
         └───────────┘
 ```
 
-#### Screen Share Mode (Stacked Layout)
+#### Screen Share Mode (OpusClip-Style 2-Region Layout)
 ```
 ┌────────────────────────────────┐
 │     Original 16:9 Frame        │
 │  ┌──────────────────────────┐  │
-│  │   Screen Content         │──│── Screen crop (avoid webcam)
+│  │   Screen Content         │──│── Square center crop
 │  │                          │  │
 │  │               ┌───┐      │  │
-│  │               │Web│◀─────│──│── Webcam overlay detected
+│  │               │Web│◀─────│──│── Face detected for bottom region
 │  │               │cam│      │  │
 │  └──────────────────────────┘  │
 └────────────────────────────────┘
@@ -340,14 +353,22 @@ Output: CropTimeline (keyframes with center positions)
               ▼
         ┌───────────┐
         │   9:16    │
-        │  ┌─────┐  │  ◀── Top 55%: Screen content
+        │  ┌─────┐  │  ◀── Top 50%: Screen (square center crop)
         │  │Screen│ │
-        │  └─────┘  │
-        │  ┌─────┐  │  ◀── Bottom 45%: Face tracking
-        │  │ Face │ │
+        │  ├─────┤  │  ◀── Captions OVERLAY (no black band)
+        │  │CAPS │  │
+        │  ├─────┤  │
+        │  │ Face │ │  ◀── Bottom 50%: Tight face crop (scaled UP)
         │  └─────┘  │
         └───────────┘
 ```
+
+**OpusClip-Style Features:**
+- **2-Region Layout**: Screen (50%) + Face (50%), no separate caption band
+- **Captions Overlay**: ASS subtitles render directly on video content
+- **Tight Face Crop**: 2x detected face size, capped at 1/3 of source
+- **Dramatic Scale-Up**: Small crop scales 3x+ to create close-up effect
+- **Video Dimension Verification**: Uses ffprobe to verify dimensions before cropping
 
 **Smoothing Algorithm:**
 ```python
@@ -424,7 +445,8 @@ Output: RenderResult (MP4 file path + metadata)
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | `focus_mode` | Single dynamic crop following face | Talking head content |
-| `stack_mode` | Split screen (55% screen + 45% face) | Screen share with speaker |
+| `opusclip_mode` | 2-region split (50% screen + 50% face) with captions overlay | Screen share with speaker (default) |
+| `stack_mode` | Legacy split screen (55% screen + 45% face) | Fallback mode |
 | `static_mode` | Center crop, no motion | Fallback when no faces |
 
 **FFmpeg Command Structure (Focus Mode):**
@@ -712,16 +734,18 @@ Content-Type: application/json
 
 ### Environment Variables
 
+The application uses a minimal set of environment variables. All processing settings (rendering, detection, captions, etc.) are hardcoded in the application for consistency.
+
 ```env
 # ═══════════════════════════════════════════════════════════════
-# CORE SETTINGS
+# APPLICATION
 # ═══════════════════════════════════════════════════════════════
+APP_NAME=viewcreator-clipping-worker
 DEBUG=false
 LOG_LEVEL=INFO
-MAX_CONCURRENT_JOBS=2
 
 # ═══════════════════════════════════════════════════════════════
-# AWS CONFIGURATION
+# AWS S3
 # ═══════════════════════════════════════════════════════════════
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=your-access-key          # Optional in ECS (use IAM roles)
@@ -729,62 +753,40 @@ AWS_SECRET_ACCESS_KEY=your-secret-key      # Optional in ECS (use IAM roles)
 S3_BUCKET=viewcreator-media
 
 # ═══════════════════════════════════════════════════════════════
-# AI SERVICES
+# API KEYS (Required)
 # ═══════════════════════════════════════════════════════════════
-
-# Transcription (Groq Whisper - 216x realtime)
-GROQ_API_KEY=gsk_...
-TRANSCRIPTION_MODEL=whisper-large-v3-turbo
-
-# Intelligence Planning (OpenRouter → Gemini)
-OPENROUTER_API_KEY=sk-or-...
-GEMINI_MODEL=google/gemini-2.5-flash
-
-# ═══════════════════════════════════════════════════════════════
-# VIDEO PROCESSING
-# ═══════════════════════════════════════════════════════════════
-
-# Download
-YTDLP_PATH=/usr/local/bin/yt-dlp
-MAX_DOWNLOAD_DURATION_SECONDS=7200
-
-# Rendering
-TARGET_OUTPUT_WIDTH=1080
-TARGET_OUTPUT_HEIGHT=1920
-FFMPEG_PRESET=veryfast
-FFMPEG_CRF=20
-
-# Stack Layout (screen share mode)
-STACK_SCREEN_HEIGHT_RATIO=0.55
-STACK_FACE_HEIGHT_RATIO=0.45
-
-# ═══════════════════════════════════════════════════════════════
-# DETECTION
-# ═══════════════════════════════════════════════════════════════
-FACE_CONFIDENCE_THRESHOLD=0.5
-POSE_CONFIDENCE_THRESHOLD=0.5
-FRAME_INTERVAL_SECONDS=2.0
+GROQ_API_KEY=gsk_...                       # Groq Whisper transcription
+OPENROUTER_API_KEY=sk-or-...               # OpenRouter → Gemini planning
 ```
 
 ### Full Configuration Reference
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `APP_NAME` | `viewcreator-clipping-worker` | Application name |
 | `DEBUG` | `false` | Enable debug logging |
 | `LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
-| `MAX_CONCURRENT_JOBS` | `2` | Maximum parallel processing jobs |
 | `AWS_REGION` | `us-east-1` | AWS region for S3 |
+| `AWS_ACCESS_KEY_ID` | - | AWS access key (optional with IAM roles) |
+| `AWS_SECRET_ACCESS_KEY` | - | AWS secret key (optional with IAM roles) |
 | `S3_BUCKET` | `viewcreator-media` | S3 bucket for video storage |
-| `GROQ_API_KEY` | - | **Required** Groq API key |
-| `OPENROUTER_API_KEY` | - | **Required** OpenRouter API key |
-| `TRANSCRIPTION_MODEL` | `whisper-large-v3-turbo` | Whisper model variant |
-| `GEMINI_MODEL` | `google/gemini-2.5-flash` | Gemini model for planning |
-| `TARGET_OUTPUT_WIDTH` | `1080` | Output video width (px) |
-| `TARGET_OUTPUT_HEIGHT` | `1920` | Output video height (px) |
-| `FFMPEG_PRESET` | `veryfast` | Encoding speed preset |
-| `FFMPEG_CRF` | `20` | Quality (lower = better, 18-23 recommended) |
-| `FACE_CONFIDENCE_THRESHOLD` | `0.5` | Minimum face detection confidence |
-| `MAX_DOWNLOAD_DURATION_SECONDS` | `7200` | Max video length (2 hours) |
+| `GROQ_API_KEY` | - | **Required** Groq API key for transcription |
+| `OPENROUTER_API_KEY` | - | **Required** OpenRouter API key for AI planning |
+
+### Hardcoded Settings
+
+All other settings are hardcoded in `app/config.py` for consistency:
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| Output Resolution | 1080x1920 | 9:16 portrait video |
+| FFmpeg Preset | veryfast | Encoding speed |
+| FFmpeg CRF | 20 | Quality level |
+| OpusClip Layout | 50% / 50% | Screen (top) / Face (bottom) |
+| Transcription Model | whisper-large-v3-turbo | Groq Whisper model |
+| Gemini Model | google/gemini-2.5-flash | AI planning model |
+| Face Detection | Multi-tier fallback | MediaPipe + YOLO + Haar |
+| Caption Style | Arial Black, 72px, Gold highlight | Word-by-word highlighting |
 
 ---
 
@@ -803,8 +805,13 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # Application
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+      # AWS S3
       - AWS_REGION=us-east-1
       - S3_BUCKET=viewcreator-media-dev
+      # API Keys (required)
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
@@ -856,8 +863,9 @@ docker-compose up -d --build
         }
       ],
       "environment": [
+        { "name": "AWS_REGION", "value": "us-east-1" },
         { "name": "S3_BUCKET", "value": "viewcreator-media" },
-        { "name": "AWS_REGION", "value": "us-east-1" }
+        { "name": "LOG_LEVEL", "value": "INFO" }
       ],
       "healthCheck": {
         "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
@@ -1069,11 +1077,14 @@ docker-compose up -d --build
 | Issue | Cause | Solution |
 |-------|-------|----------|
 | `GROQ_API_KEY not set` | Missing env var | Export GROQ_API_KEY |
+| `OPENROUTER_API_KEY not set` | Missing env var | Export OPENROUTER_API_KEY |
 | `yt-dlp not found` | Missing binary | Install yt-dlp |
 | `FFmpeg not found` | Missing binary | Install ffmpeg |
 | `S3 upload failed` | Missing credentials | Set AWS credentials or IAM role |
-| `Detection returning 0 faces` | Low confidence threshold | Lower `FACE_CONFIDENCE_THRESHOLD` |
+| `Detection returning 0 faces` | Face too small | Multi-tier fallback handles this (MediaPipe full-range detects small webcam faces) |
 | `Black screen in output` | S3 URL not transformed | Check CDN URL transformation |
+| `Crop too big error` | Video dimension mismatch | Service auto-corrects via ffprobe dimension verification |
+| `Face not filling bottom` | Crop size issue | Crop capped at 1/3 of source for 3x+ scale-up |
 
 ---
 

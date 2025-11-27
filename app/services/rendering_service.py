@@ -171,6 +171,29 @@ class RenderingService:
             duration_ms=duration_ms,
         )
 
+    async def _get_video_dimensions(self, video_path: str) -> tuple[int, int]:
+        """Get actual video dimensions using ffprobe."""
+        cmd = [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+            video_path,
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await process.communicate()
+            dims = stdout.decode().strip().split("x")
+            return int(dims[0]), int(dims[1])
+        except Exception as e:
+            logger.warning(f"Failed to probe video dimensions: {e}")
+            return 0, 0
+
     async def _render_opusclip_mode(
         self,
         request: RenderRequest,
@@ -191,13 +214,28 @@ class RenderingService:
         screen_timeline = request.secondary_timeline  # Screen content
         assert face_timeline and screen_timeline
 
+        # Get actual video dimensions to ensure crop is valid
+        actual_width, actual_height = await self._get_video_dimensions(request.video_path)
+        if actual_width > 0 and actual_height > 0:
+            # Update timelines with actual dimensions if they differ
+            if face_timeline.source_width != actual_width or face_timeline.source_height != actual_height:
+                logger.warning(
+                    f"Timeline dimensions mismatch: timeline={face_timeline.source_width}x{face_timeline.source_height}, "
+                    f"actual={actual_width}x{actual_height}. Using actual dimensions."
+                )
+                face_timeline.source_width = actual_width
+                face_timeline.source_height = actual_height
+                screen_timeline.source_width = actual_width
+                screen_timeline.source_height = actual_height
+
         # Calculate region heights based on OpusClip ratios (2 regions, no caption band)
         total_height = self.settings.target_output_height
         screen_height = int(total_height * self.settings.opusclip_screen_ratio)
         face_height = total_height - screen_height  # Remaining space for face
 
         logger.info(
-            f"OpusClip mode render: screen={screen_height}px, face={face_height}px (captions overlaid)"
+            f"OpusClip mode render: source={face_timeline.source_width}x{face_timeline.source_height}, "
+            f"screen={screen_height}px, face={face_height}px (captions overlaid)"
         )
 
         output_dir = os.path.dirname(request.output_path)
@@ -264,27 +302,31 @@ class RenderingService:
     ) -> None:
         """
         Render screen content for OpusClip layout.
-        
+
         Following epiriumaiclips approach: Take a SQUARE crop from the CENTER
         of the original frame, then resize to fill the target width.
         This captures the screen content (typically in the middle of the frame).
         """
         source_w = timeline.source_width
         source_h = timeline.source_height
-        
+
         # Take a square crop from the CENTER of the frame (epiriumaiclips style)
-        # This captures the screen share content which is typically centered
+        # Use the smaller dimension to ensure the crop fits
         square_size = min(source_w, source_h)
-        
+
+        # Safety check: ensure square_size doesn't exceed actual source
+        square_size = min(square_size, source_w, source_h)
+
         # Center the square crop
-        crop_x = (source_w - square_size) // 2
-        crop_y = (source_h - square_size) // 2
-        
+        crop_x = max(0, (source_w - square_size) // 2)
+        crop_y = max(0, (source_h - square_size) // 2)
+
         logger.info(
-            f"OpusClip SCREEN crop: square {square_size}x{square_size} from center "
-            f"at ({crop_x}, {crop_y}) -> scale to {target_width}x{target_height}"
+            f"OpusClip SCREEN crop: source={source_w}x{source_h}, "
+            f"square {square_size}x{square_size} from center at ({crop_x}, {crop_y}) "
+            f"-> scale to {target_width}x{target_height}"
         )
-        
+
         # Crop square from center, then scale to fill target width
         # The height will be cropped to fit the target aspect ratio
         filters = [
@@ -292,7 +334,7 @@ class RenderingService:
             f"scale={target_width}:-1",  # Scale to target width, maintain aspect
             f"crop={target_width}:{target_height}:0:(ih-{target_height})/2",  # Center crop to target height
         ]
-        
+
         await self._run_ffmpeg(
             input_path=input_path,
             output_path=output_path,
@@ -328,18 +370,23 @@ class RenderingService:
         source_w = timeline.source_width
         source_h = timeline.source_height
 
-        # Use the window dimensions from timeline (tight crop calculated in pipeline)
+        # CRITICAL: Calculate crop size as fraction of source to ensure it fits
+        # Use 1/3 of the smaller dimension for a tight face crop
+        max_safe_crop = min(source_w, source_h) // 3
+        max_safe_crop = max(max_safe_crop, 200)  # Minimum for quality
+
+        # Use the window dimensions from timeline, but cap strictly
         crop_size = max(timeline.window_width, timeline.window_height)
-
-        # Ensure minimum size for quality
-        crop_size = max(crop_size, 150)
-
-        # Ensure crop doesn't exceed source dimensions
-        crop_size = min(crop_size, min(source_w, source_h))
+        crop_size = max(crop_size, 150)  # Minimum size
+        crop_size = min(crop_size, max_safe_crop)  # Cap at 1/3 of source
 
         # Center the square crop on the face position
         max_x = source_w - crop_size
         max_y = source_h - crop_size
+
+        # Ensure we have valid crop bounds
+        max_x = max(0, max_x)
+        max_y = max(0, max_y)
 
         crop_x = max(0, min(max_x, int(avg_center_x - crop_size / 2)))
         crop_y = max(0, min(max_y, int(avg_center_y - crop_size / 2)))
@@ -349,17 +396,17 @@ class RenderingService:
         scaled_height = int(crop_size * scale_factor)
 
         logger.info(
-            f"OpusClip FACE crop: {crop_size}x{crop_size} at ({crop_x}, {crop_y}) "
+            f"OpusClip FACE crop: source={source_w}x{source_h}, "
+            f"crop={crop_size}x{crop_size} at ({crop_x}, {crop_y}) "
             f"-> scale {scale_factor:.2f}x to {target_width}x{scaled_height} "
-            f"-> crop to {target_width}x{target_height}"
+            f"-> final {target_width}x{target_height}"
         )
 
         # Crop tight square around face, scale UP to fill target width,
         # then crop height from CENTER to fit target dimensions
-        # Using force_original_aspect_ratio=increase ensures we ALWAYS fill width
         filters = [
             f"crop={crop_size}:{crop_size}:{crop_x}:{crop_y}",
-            f"scale={target_width}:{target_width}:force_original_aspect_ratio=increase",
+            f"scale={target_width}:-1",  # Scale to target width, maintaining aspect
             f"crop={target_width}:{target_height}:(iw-{target_width})/2:(ih-{target_height})/2",
         ]
 

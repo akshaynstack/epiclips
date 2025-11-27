@@ -330,11 +330,12 @@ class AIClippingPipeline:
             
             # Create job output
             processing_time = time.time() - start_time
-            
+
             job_output = JobOutput(
                 job_id=job_id,
                 source_video_url=request.video_url,
                 source_video_title=download_result.metadata.title,
+                source_video_duration_seconds=download_result.metadata.duration_seconds,
                 total_clips=len(clip_artifacts),
                 clips=clip_artifacts,
                 user_id=request.owner_user_id,
