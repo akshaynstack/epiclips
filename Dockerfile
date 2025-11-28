@@ -87,6 +87,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     # yt-dlp dependencies
     ca-certificates \
+    # Node.js for yt-dlp YouTube extraction (required since late 2024)
+    # YouTube now requires a JavaScript runtime for extracting video info
+    nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     # Refresh font cache for caption rendering

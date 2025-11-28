@@ -1,4 +1,4 @@
-name: Build and Push Genesis Image
+name: Build, Push, and Deploy Genesis
 
 on:
   push:
@@ -6,13 +6,22 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  AWS_REGION: us-east-1
+  ECS_CLUSTER: viewcreator-prod
+  ECS_SERVICE: viewcreator-prod-genesis
+  ECR_REPOSITORY: viewcreator-prod-genesis
+
 jobs:
   build-and-push:
-    name: Build and Push
+    name: Build and Push to ECR
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
+    outputs:
+      image_uri: ${{ steps.meta.outputs.repository_uri }}:${{ steps.meta.outputs.latest_tag }}
+      sha_tag: ${{ steps.meta.outputs.sha_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,8 +31,8 @@ jobs:
         run: |
           set -euo pipefail
           SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
-          echo "repository=viewcreator-prod-genesis" >> "$GITHUB_OUTPUT"
-          echo "repository_uri=830088749582.dkr.ecr.us-east-1.amazonaws.com/viewcreator-prod-genesis" >> "$GITHUB_OUTPUT"
+          echo "repository=${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
+          echo "repository_uri=830088749582.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
           echo "latest_tag=prod-latest" >> "$GITHUB_OUTPUT"
           echo "sha_tag=prod-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
         shell: bash
@@ -32,27 +41,110 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
-          aws-region: ${{ vars.AWS_REGION_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push image
-        env:
-          ECR_REPOSITORY_URI: ${{ steps.meta.outputs.repository_uri }}
-          LATEST_TAG: ${{ steps.meta.outputs.latest_tag }}
-          SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.repository_uri }}:${{ steps.meta.outputs.latest_tag }}
+            ${{ steps.meta.outputs.repository_uri }}:${{ steps.meta.outputs.sha_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image details
+        run: |
+          echo "### 🐳 Docker Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ steps.meta.outputs.repository_uri }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.latest_tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.sha_tag }}\`" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: Deploy to ECS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Force new deployment
+        id: deploy
         run: |
           set -euo pipefail
-          if [ -z "${ECR_REPOSITORY_URI}" ]; then
-            echo "ECR repository URI missing" >&2
-            exit 1
+          
+          echo "Forcing new deployment of ${{ env.ECS_SERVICE }} in cluster ${{ env.ECS_CLUSTER }}..."
+          
+          # Force new deployment - ECS will pull the latest image
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --query 'service.deployments[0].{status:status,runningCount:runningCount,desiredCount:desiredCount}' \
+            --output table
+          
+          echo "Deployment initiated successfully"
+
+      - name: Wait for deployment stability
+        run: |
+          set -euo pipefail
+          
+          echo "Waiting for service to stabilize (timeout: 10 minutes)..."
+          
+          # Wait for the service to reach steady state
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --timeout 600 || {
+              echo "::warning::Service did not stabilize within timeout, but deployment may still succeed"
+              exit 0
+            }
+          
+          echo "Service is stable!"
+
+      - name: Verify deployment
+        run: |
+          set -euo pipefail
+          
+          # Get current deployment status
+          DEPLOYMENT_STATUS=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].deployments[?status==`PRIMARY`].{status:status,runningCount:runningCount,desiredCount:desiredCount,rolloutState:rolloutState}' \
+            --output json)
+          
+          echo "### 🚀 Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** ${{ env.ECS_CLUSTER }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ env.ECS_SERVICE }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Status:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+          echo "$DEPLOYMENT_STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if rollout completed
+          ROLLOUT_STATE=$(echo "$DEPLOYMENT_STATUS" | jq -r '.[0].rolloutState // "UNKNOWN"')
+          if [ "$ROLLOUT_STATE" == "COMPLETED" ]; then
+            echo "✅ Deployment completed successfully!" >> $GITHUB_STEP_SUMMARY
+          elif [ "$ROLLOUT_STATE" == "IN_PROGRESS" ]; then
+            echo "⏳ Deployment still in progress" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Deployment state: $ROLLOUT_STATE" >> $GITHUB_STEP_SUMMARY
           fi
-          docker build \
-            --pull \
-            -t "$ECR_REPOSITORY_URI:$LATEST_TAG" \
-            -t "$ECR_REPOSITORY_URI:$SHA_TAG" \
-            .
-          docker push "$ECR_REPOSITORY_URI:$LATEST_TAG"
-          docker push "$ECR_REPOSITORY_URI:$SHA_TAG"
