@@ -1,6 +1,6 @@
-# ViewCreator Clipping Worker
+# ViewCreator Genesis
 
-A production-ready FastAPI video processing microservice that transforms long-form YouTube videos into viral-optimized short-form clips using AI-powered analysis, intelligent cropping, and automated caption generation.
+Genesis is ViewCreator's media processing engine - a production-ready FastAPI microservice that transforms long-form YouTube videos into viral-optimized short-form clips using AI-powered analysis, intelligent cropping, and automated caption generation.
 
 ## Table of Contents
 
@@ -12,13 +12,16 @@ A production-ready FastAPI video processing microservice that transforms long-fo
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [Integration](#integration)
+  - [NestJS API Integration](#nestjs-api-integration)
+  - [Webhook Integration](#webhook-integration)
+  - [Frontend Integration](#frontend-integration)
 - [Development](#development)
 
 ---
 
 ## Overview
 
-The ViewCreator Clipping Worker is a specialized microservice that handles the computationally intensive work of:
+ViewCreator Genesis is the media processing engine that handles the computationally intensive work of:
 
 1. **Downloading** videos from YouTube or S3
 2. **Transcribing** audio with word-level timestamps using Whisper
@@ -50,13 +53,14 @@ The ViewCreator Clipping Worker is a specialized microservice that handles the c
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Creator UI      │────▶│  NestJS API      │────▶│  Clipping Worker │
-│  (Next.js)       │     │  (viewcreator-   │     │  (FastAPI)       │
+│  Creator UI      │────▶│  NestJS API      │────▶│     Genesis      │
+│  (Next.js)       │     │  (viewcreator-   │     │    (FastAPI)     │
 │                  │◀────│   api)           │◀────│                  │
 └──────────────────┘     └──────────────────┘     └──────────────────┘
-                                │                          │
-                                │                          │
-                                ▼                          ▼
+                                │      ▲                   │
+                                │      │ webhooks          │
+                                │      │ (real-time)       │
+                                ▼      │                   ▼
                          ┌──────────────┐          ┌──────────────┐
                          │   Postgres   │          │     AWS      │
                          │   (Jobs DB)  │          │  S3 Bucket   │
@@ -529,7 +533,7 @@ async def upload_job_artifacts(
 ### Directory Structure
 
 ```
-viewcreator-clipping-worker/
+viewcreator-genesis/
 ├── app/
 │   ├── main.py                    # FastAPI application entry
 │   ├── config.py                  # Pydantic Settings configuration
@@ -551,7 +555,8 @@ viewcreator-clipping-worker/
 │   │   ├── caption_generator.py       # ASS subtitle generation
 │   │   ├── rendering_service.py       # FFmpeg rendering
 │   │   ├── s3_upload_service.py       # S3 upload handling
-│   │   └── s3_client.py               # Low-level S3 operations
+│   │   ├── s3_client.py               # Low-level S3 operations
+│   │   └── webhook_service.py         # Webhook delivery to API
 │   └── schemas/
 │       ├── requests.py                # Pydantic request models
 │       └── responses.py               # Pydantic response models
@@ -740,7 +745,7 @@ The application uses a minimal set of environment variables. All processing sett
 # ═══════════════════════════════════════════════════════════════
 # APPLICATION
 # ═══════════════════════════════════════════════════════════════
-APP_NAME=viewcreator-clipping-worker
+APP_NAME=viewcreator-genesis
 DEBUG=false
 LOG_LEVEL=INFO
 
@@ -763,7 +768,7 @@ OPENROUTER_API_KEY=sk-or-...               # OpenRouter → Gemini planning
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APP_NAME` | `viewcreator-clipping-worker` | Application name |
+| `APP_NAME` | `viewcreator-genesis` | Application name |
 | `DEBUG` | `false` | Enable debug logging |
 | `LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
 | `AWS_REGION` | `us-east-1` | AWS region for S3 |
@@ -799,9 +804,9 @@ All other settings are hardcoded in `app/config.py` for consistency:
 version: '3.8'
 
 services:
-  clipping-worker:
+  genesis:
     build: .
-    container_name: viewcreator-clipping-worker
+    container_name: viewcreator-genesis
     ports:
       - "8000:8000"
     environment:
@@ -815,7 +820,7 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
-      - /tmp/clipping-worker:/tmp/clipping-worker
+      - /tmp/genesis:/tmp/genesis
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -828,7 +833,7 @@ services:
 docker-compose up --build
 
 # View logs
-docker logs viewcreator-clipping-worker -f
+docker logs viewcreator-genesis -f
 
 # Rebuild after code changes
 docker-compose up -d --build
@@ -838,17 +843,17 @@ docker-compose up -d --build
 
 ```json
 {
-  "family": "clipping-worker",
+  "family": "genesis",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "4096",
   "memory": "8192",
   "executionRoleArn": "arn:aws:iam::...:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::...:role/clipping-worker-task-role",
+  "taskRoleArn": "arn:aws:iam::...:role/genesis-task-role",
   "containerDefinitions": [
     {
-      "name": "clipping-worker",
-      "image": "your-ecr-repo/clipping-worker:latest",
+      "name": "genesis",
+      "image": "your-ecr-repo/genesis:latest",
       "portMappings": [
         { "containerPort": 8000, "protocol": "tcp" }
       ],
@@ -877,7 +882,7 @@ docker-compose up -d --build
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
-          "awslogs-group": "/ecs/clipping-worker",
+          "awslogs-group": "/ecs/genesis",
           "awslogs-region": "us-east-1",
           "awslogs-stream-prefix": "ecs"
         }
@@ -968,6 +973,89 @@ export class ClippingWorkerClientService {
 }
 ```
 
+### Webhook Integration
+
+Genesis sends real-time job status updates to the NestJS API via webhooks, eliminating the need for constant polling.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         WEBHOOK FLOW                                             │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+viewcreator-api                                          genesis
+      │                                                        │
+      │  POST /ai-clipping/jobs                                │
+      │  { callback_url: "https://api.../webhooks/ai-clipping" │
+      │───────────────────────────────────────────────────────▶│
+      │◀─────────────────────────────────────────────────────── │ 202 {job_id}
+      │                                                        │
+      │  POST /webhooks/ai-clipping (job.started)              │
+      │◀───────────────────────────────────────────────────────│
+      │                                                        │
+      │  POST /webhooks/ai-clipping (job.progress: 25%)        │
+      │◀───────────────────────────────────────────────────────│
+      │                                                        │
+      │  POST /webhooks/ai-clipping (job.completed)            │
+      │◀───────────────────────────────────────────────────────│ {clips: [...]}
+```
+
+**Webhook Events:**
+
+| Event | When Sent | Payload |
+|-------|-----------|---------|
+| `job.started` | Processing begins | `{status, progress: 0}` |
+| `job.progress` | Each pipeline stage | `{status, progress, current_step}` |
+| `job.completed` | Job succeeds | `{status: succeeded, output: {clips}}` |
+| `job.failed` | Job fails | `{status: failed, error}` |
+
+**Webhook Payload Structure:**
+
+```json
+{
+  "event": "job.progress",
+  "timestamp": "2024-11-28T10:32:00.000Z",
+  "job_id": "genesis-internal-id",
+  "external_job_id": "api-job-uuid",
+  "owner_user_id": "user-123",
+  "status": "running",
+  "progress_percent": 65,
+  "current_step": "Rendering clip 3/5...",
+  "clips_completed": 2,
+  "total_clips": 5
+}
+```
+
+**Webhook Service Features:**
+
+- **Automatic retries**: 3 retries with exponential backoff (1s, 2s, 4s)
+- **Throttling**: Progress webhooks limited to every 2 seconds
+- **Fire-and-forget**: Progress updates don't block pipeline
+- **Guaranteed delivery**: Terminal events (completed/failed) are awaited
+
+**Configuration:**
+
+The API passes `callback_url` when submitting jobs:
+
+```python
+# Genesis receives callback_url in job request
+{
+  "video_url": "https://youtube.com/...",
+  "callback_url": "https://api.viewcreator.ai/webhooks/ai-clipping",
+  "external_job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "owner_user_id": "user-123"
+}
+```
+
+The API requires these environment variables for webhooks:
+
+```env
+# viewcreator-api .env
+API_BASE_URL=https://api.viewcreator.ai   # Used to build callback URL
+WEBHOOK_SECRET=your-secret-key            # Optional: for signature verification
+```
+
+See [WEBHOOKS_IMPLEMENTATION.md](./WEBHOOKS_IMPLEMENTATION.md) for full implementation details.
+
 ### Frontend Integration
 
 ```typescript
@@ -1014,7 +1102,7 @@ const handleSubmit = async () => {
 
 ```bash
 # 1. Clone and setup
-cd viewcreator-clipping-worker
+cd viewcreator-genesis
 python -m venv venv
 source venv/bin/activate
 
@@ -1061,12 +1149,12 @@ open http://localhost:8000/docs
 
 ```bash
 # View Docker logs
-docker logs viewcreator-clipping-worker -f --tail=100
+docker logs viewcreator-genesis -f --tail=100
 
 # Check specific stage
-docker logs viewcreator-clipping-worker 2>&1 | grep "Transcription"
-docker logs viewcreator-clipping-worker 2>&1 | grep "Detection"
-docker logs viewcreator-clipping-worker 2>&1 | grep "Rendering"
+docker logs viewcreator-genesis 2>&1 | grep "Transcription"
+docker logs viewcreator-genesis 2>&1 | grep "Detection"
+docker logs viewcreator-genesis 2>&1 | grep "Rendering"
 
 # Rebuild after changes
 docker-compose up -d --build

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document outlines the migration of the AI Clipping Agent from `viewcreator-api` (NestJS/TypeScript) to `viewcreator-clipping-worker` (Python/FastAPI). The goal is to consolidate all video processing, transcription, intelligence planning, and rendering into a single Python microservice.
+This document outlines the migration of the AI Clipping Agent from `viewcreator-api` (NestJS/TypeScript) to `viewcreator-genesis` (Python/FastAPI). The goal is to consolidate all video processing, transcription, intelligence planning, and rendering into a single Python microservice.
 
 ## Current Architecture (Before Migration)
 
@@ -17,14 +17,14 @@ This document outlines the migration of the AI Clipping Agent from `viewcreator-
 - `DetectionWorkerClientService` - HTTP client to Python worker
 - `AiClippingAgentProcessor` - BullMQ job processor
 
-### viewcreator-clipping-worker (Python)
+### viewcreator-genesis (Python)
 - Face detection (YOLO)
 - Pose estimation (MediaPipe)
 - Object tracking (DeepSORT)
 
 ## Target Architecture (After Migration)
 
-### viewcreator-clipping-worker (Python) - FULL PIPELINE
+### viewcreator-genesis (Python) - FULL PIPELINE
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                    AI Clipping Pipeline (Python)                        │
@@ -73,7 +73,7 @@ This document outlines the migration of the AI Clipping Agent from `viewcreator-
 ## New Directory Structure
 
 ```
-viewcreator-clipping-worker/
+viewcreator-genesis/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                          # FastAPI app entry point

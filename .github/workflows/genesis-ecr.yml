@@ -1,0 +1,58 @@
+name: Build and Push Genesis Image
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up build metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "repository=viewcreator-prod-genesis" >> "$GITHUB_OUTPUT"
+          echo "repository_uri=830088749582.dkr.ecr.us-east-1.amazonaws.com/viewcreator-prod-genesis" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=prod-latest" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=prod-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ vars.AWS_REGION_PROD }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_REPOSITORY_URI: ${{ steps.meta.outputs.repository_uri }}
+          LATEST_TAG: ${{ steps.meta.outputs.latest_tag }}
+          SHA_TAG: ${{ steps.meta.outputs.sha_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ECR_REPOSITORY_URI}" ]; then
+            echo "ECR repository URI missing" >&2
+            exit 1
+          fi
+          docker build \
+            --pull \
+            -t "$ECR_REPOSITORY_URI:$LATEST_TAG" \
+            -t "$ECR_REPOSITORY_URI:$SHA_TAG" \
+            .
+          docker push "$ECR_REPOSITORY_URI:$LATEST_TAG"
+          docker push "$ECR_REPOSITORY_URI:$SHA_TAG"

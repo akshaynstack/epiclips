@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # ============================================================
 
     # Application
-    app_name: str = "viewcreator-clipping-worker"
+    app_name: str = "viewcreator-genesis"
     debug: bool = False
     log_level: str = "INFO"
 
@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # API Keys (required)
     groq_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+
+    # Security - API authentication
+    genesis_api_key: Optional[str] = None  # API key for authenticating incoming requests
+    genesis_webhook_secret: Optional[str] = None  # Secret for signing outgoing webhooks
 
     # ============================================================
     # HARDCODED SETTINGS (not configurable via env vars)
@@ -80,7 +84,7 @@ class Settings(BaseSettings):
 
     @property
     def temp_directory(self) -> str:
-        return "/tmp/clipping-worker"
+        return "/tmp/genesis"
 
     @property
     def workspace_root(self) -> str:

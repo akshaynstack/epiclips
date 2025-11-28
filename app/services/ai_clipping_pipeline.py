@@ -53,6 +53,10 @@ from app.services.content_region_detector import (
     ContentRegionDetector,
     FrameAnalysis,
 )
+from app.services.webhook_service import (
+    WebhookService,
+    get_webhook_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +78,10 @@ class JobStatus(str, Enum):
 @dataclass
 class ClippingJobRequest:
     """Request to process a video for AI clipping."""
-    
+
     video_url: str
     job_id: Optional[str] = None
+    external_job_id: Optional[str] = None  # External reference (e.g., API job ID)
     owner_user_id: Optional[str] = None  # User ID for S3 key scoping
     max_clips: int = 5
     min_clip_duration_seconds: int = 15
@@ -85,8 +90,8 @@ class ClippingJobRequest:
     target_platform: str = "tiktok"  # tiktok, youtube_shorts, instagram_reels
     include_captions: bool = True
     caption_style: Optional[CaptionStyle] = None
-    callback_url: Optional[str] = None
-    
+    callback_url: Optional[str] = None  # URL to receive webhook notifications
+
     def __post_init__(self):
         if self.job_id is None:
             self.job_id = str(uuid.uuid4())
@@ -133,11 +138,13 @@ class AIClippingPipeline:
         self,
         detection_pipeline: DetectionPipeline,
         progress_callback: Optional[Callable[[ClippingJobProgress], None]] = None,
+        webhook_service: Optional[WebhookService] = None,
     ):
         self.settings = get_settings()
         self.detection_pipeline = detection_pipeline
         self.progress_callback = progress_callback
-        
+        self.webhook_service = webhook_service or get_webhook_service()
+
         # Initialize services
         self.video_downloader = VideoDownloaderService()
         self.transcription_service = TranscriptionService()
@@ -145,6 +152,11 @@ class AIClippingPipeline:
         self.rendering_service = RenderingService()
         self.s3_upload_service = S3UploadService()
         self.content_region_detector = ContentRegionDetector()
+
+        # Current request context for webhooks (set during process_video)
+        self._current_callback_url: Optional[str] = None
+        self._current_external_job_id: Optional[str] = None
+        self._current_owner_user_id: Optional[str] = None
 
     async def process_video(
         self,
@@ -162,10 +174,16 @@ class AIClippingPipeline:
         start_time = time.time()
         job_id = request.job_id
         work_dir = os.path.join(self.settings.temp_directory, job_id)
-        
+
+        # Set webhook context for this request
+        self._current_callback_url = request.callback_url
+        self._current_external_job_id = request.external_job_id
+        self._current_owner_user_id = request.owner_user_id
+
         try:
             os.makedirs(work_dir, exist_ok=True)
             logger.info(f"Starting AI clipping job: {job_id}")
+            logger.info(f"Webhook callback URL: {self._current_callback_url or 'NOT SET'}")
             
             # Step 1: Download video
             self._update_progress(job_id, JobStatus.DOWNLOADING, 5, "Downloading video...")
@@ -347,10 +365,30 @@ class AIClippingPipeline:
             # Upload job manifest
             await self.s3_upload_service.upload_job_output(job_output)
             
+            # Build webhook output payload with clip URLs and metadata
+            webhook_output = {
+                "total_clips": len(clip_artifacts),
+                "source_video_title": job_output.source_video_title,
+                "processing_time_seconds": processing_time,
+                "clips": [
+                    {
+                        "clip_index": clip.clip_index,
+                        "s3_url": clip.s3_url,
+                        "duration_ms": clip.duration_ms,
+                        "virality_score": clip.virality_score,
+                        "summary": clip.summary,
+                    }
+                    for clip in clip_artifacts
+                ],
+                "transcript_url": job_output.transcript_url,
+                "plan_url": job_output.plan_url,
+            }
+
             self._update_progress(
                 job_id, JobStatus.COMPLETED, 100,
                 "Processing complete!",
                 clips_completed=total_clips, total_clips=total_clips,
+                output=webhook_output,
             )
             
             logger.info(f"Job {job_id} completed in {processing_time:.1f}s with {len(clip_artifacts)} clips")
@@ -385,6 +423,12 @@ class AIClippingPipeline:
                     shutil.rmtree(work_dir)
                 except Exception as e:
                     logger.warning(f"Failed to cleanup work dir: {e}")
+
+            # Clear webhook context and tracking
+            self.webhook_service.clear_job_tracking(job_id)
+            self._current_callback_url = None
+            self._current_external_job_id = None
+            self._current_owner_user_id = None
 
     async def _run_detection_for_clips(
         self,
@@ -796,8 +840,10 @@ class AIClippingPipeline:
         clips_completed: int = 0,
         total_clips: int = 0,
         error: Optional[str] = None,
+        output: Optional[dict] = None,
     ) -> None:
-        """Update job progress via callback."""
+        """Update job progress via callback and webhook."""
+        # Call in-memory progress callback
         if self.progress_callback:
             try:
                 self.progress_callback(ClippingJobProgress(
@@ -811,4 +857,88 @@ class AIClippingPipeline:
                 ))
             except Exception as e:
                 logger.warning(f"Progress callback failed: {e}")
+
+        # Send webhook if callback URL is configured
+        if self._current_callback_url:
+            self._send_webhook(
+                job_id=job_id,
+                status=status,
+                progress=progress,
+                step=step,
+                clips_completed=clips_completed,
+                total_clips=total_clips,
+                error=error,
+                output=output,
+            )
+
+    def _send_webhook(
+        self,
+        job_id: str,
+        status: JobStatus,
+        progress: float,
+        step: str,
+        clips_completed: int = 0,
+        total_clips: int = 0,
+        error: Optional[str] = None,
+        output: Optional[dict] = None,
+    ) -> None:
+        """Send webhook notification for job status update."""
+        # Map JobStatus to webhook event names
+        event_map = {
+            JobStatus.PENDING: "job.started",
+            JobStatus.DOWNLOADING: "job.progress",
+            JobStatus.TRANSCRIBING: "job.progress",
+            JobStatus.PLANNING: "job.progress",
+            JobStatus.DETECTING: "job.progress",
+            JobStatus.RENDERING: "job.progress",
+            JobStatus.UPLOADING: "job.progress",
+            JobStatus.COMPLETED: "job.completed",
+            JobStatus.FAILED: "job.failed",
+        }
+        event = event_map.get(status, "job.progress")
+
+        # Map JobStatus to API-compatible status values
+        status_map = {
+            JobStatus.PENDING: "queued",
+            JobStatus.DOWNLOADING: "running",
+            JobStatus.TRANSCRIBING: "running",
+            JobStatus.PLANNING: "running",
+            JobStatus.DETECTING: "running",
+            JobStatus.RENDERING: "running",
+            JobStatus.UPLOADING: "running",
+            JobStatus.COMPLETED: "succeeded",
+            JobStatus.FAILED: "failed",
+        }
+        api_status = status_map.get(status, "running")
+
+        # For progress events, throttle to avoid overwhelming the receiver
+        is_terminal = status in (JobStatus.COMPLETED, JobStatus.FAILED)
+        if not is_terminal and not self.webhook_service.should_send_progress(job_id):
+            return
+
+        # Build and send the webhook payload
+        payload = self.webhook_service.build_payload(
+            event=event,
+            job_id=job_id,
+            status=api_status,
+            progress_percent=progress,
+            current_step=step,
+            external_job_id=self._current_external_job_id,
+            owner_user_id=self._current_owner_user_id,
+            clips_completed=clips_completed,
+            total_clips=total_clips,
+            error=error,
+            output=output,
+        )
+
+        logger.info(f"Sending webhook: {event} to {self._current_callback_url}")
+
+        # Fire and forget for progress updates, await for terminal events
+        try:
+            asyncio.create_task(
+                self.webhook_service.send(self._current_callback_url, payload)
+            )
+        except RuntimeError as e:
+            # No event loop running - log and skip
+            logger.warning(f"Could not send webhook (no event loop): {e}")
 

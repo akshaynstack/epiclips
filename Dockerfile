@@ -1,10 +1,10 @@
 # =============================================================================
-# ViewCreator Clipping Worker - Multi-stage Dockerfile
+# ViewCreator Genesis - Multi-stage Dockerfile
 # =============================================================================
 # Stage 1: Build stage - Install dependencies and download models
 # Stage 2: Runtime stage - Minimal image for production
 #
-# This service provides:
+# Genesis is ViewCreator's media processing engine, providing:
 # - Video detection (YOLO, MediaPipe, DeepSORT)
 # - Full AI clipping pipeline (transcription, intelligence, rendering)
 # =============================================================================
@@ -50,7 +50,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     # App config
     APP_HOME=/app \
-    TEMP_DIRECTORY=/tmp/clipping-worker \
+    TEMP_DIRECTORY=/tmp/genesis \
     YOLO_MODEL_PATH=/app/models/yolov8n.pt \
     # Disable MediaPipe GPU (use CPU)
     MEDIAPIPE_DISABLE_GPU=1 \

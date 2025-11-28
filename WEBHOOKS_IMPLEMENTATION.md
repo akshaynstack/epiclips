@@ -1,74 +1,35 @@
-# Webhooks Implementation Plan
+# Webhooks Implementation
 
 This document outlines the webhook system for real-time job status updates between the clipping worker and viewcreator-api.
 
----
-
-## Overview
-
-### Why Webhooks?
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         POLLING (Current - Inefficient)                          │
-└─────────────────────────────────────────────────────────────────────────────────┘
-
-viewcreator-api                                          clipping-worker
-      │                                                        │
-      │  POST /ai-clipping/jobs                                │
-      │───────────────────────────────────────────────────────▶│
-      │◀─────────────────────────────────────────────────────── │ 202 {job_id}
-      │                                                        │
-      │  GET /jobs/abc123  "is it done yet?"                   │
-      │───────────────────────────────────────────────────────▶│
-      │◀─────────────────────────────────────────────────────── │ {status: 10%}
-      │                                                        │
-      │  GET /jobs/abc123  "is it done yet?"                   │
-      │───────────────────────────────────────────────────────▶│
-      │◀─────────────────────────────────────────────────────── │ {status: 25%}
-      │                                                        │
-      │         ... repeats every 5-10 seconds ...             │
-      │         ... for 10+ minutes per job ...                │
-      │         ... 50-100+ wasted requests per job ...        │
-
-
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         WEBHOOKS (Proposed - Efficient)                          │
-└─────────────────────────────────────────────────────────────────────────────────┘
-
-viewcreator-api                                          clipping-worker
-      │                                                        │
-      │  POST /ai-clipping/jobs                                │
-      │  { callback_url: "https://api.viewcreator.ai/webhooks" │
-      │───────────────────────────────────────────────────────▶│
-      │                                                        │
-      │◀─────────────────────────────────────────────────────── │ 202 {job_id}
-      │                                                        │
-      │         ... viewcreator-api does other work ...        │
-      │         ... no polling needed ...                      │
-      │                                                        │
-      │  POST /webhooks/clipping (worker calls API)            │
-      │◀───────────────────────────────────────────────────────│ {status: 50%}
-      │                                                        │
-      │  POST /webhooks/clipping (job complete!)               │
-      │◀───────────────────────────────────────────────────────│ {status: done, clips: [...]}
-
-      Only 3 HTTP requests vs 50+ with polling!
-```
-
-### Benefits
-
-| Aspect | Polling | Webhooks |
-|--------|---------|----------|
-| HTTP requests per job | 50-100+ | 3-6 |
-| Status update latency | 5-10 seconds | Instant |
-| Server load | High | Low |
-| User experience | Laggy progress | Real-time updates |
-| Scalability | Poor | Excellent |
+> **Last Updated**: 2025-11-28
+>
+> **Entity Reference**: `AiClippingAgentJob` (table: `ai_clipping_agent_jobs`)
+>
+> **Implementation Status**: ✅ Complete and Working
 
 ---
 
-## Architecture
+## Current Implementation Status
+
+| Component | Status | Location | Notes |
+|-----------|--------|----------|-------|
+| `AiClippingAgentJob` entity | ✅ Complete | viewcreator-database | Typed columns for progress tracking |
+| `ClippingWorkerClientService` | ✅ Complete | viewcreator-api | Supports `callback_url` parameter |
+| `WebhookService` (Python) | ✅ Complete | viewcreator-genesis | `app/services/webhook_service.py` |
+| Pipeline Integration | ✅ Complete | viewcreator-genesis | `ai_clipping_pipeline.py` modified |
+| Webhook endpoint (API) | ✅ Complete | viewcreator-api | `/api/webhooks/ai-clipping` |
+| `WebhooksService` (NestJS) | ✅ Complete | viewcreator-api | `src/modules/webhooks/` |
+| Callback URL passing | ✅ Complete | viewcreator-api | `AiClippingAgentJobsService` |
+| Polling fallback | ❌ Removed | viewcreator-api | Webhooks are the sole mechanism |
+| Real-time notifications | ⏳ Future | - | WebSocket integration pending |
+| Webhook authentication | ⏳ Future | - | HMAC signature verification |
+
+**Implementation approach**: Webhooks only (polling removed for simplicity)
+
+---
+
+## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -77,8 +38,8 @@ viewcreator-api                                          clipping-worker
 
 ┌──────────────────┐         ┌──────────────────┐         ┌──────────────────┐
 │                  │         │                  │         │                  │
-│  viewcreator-api │◀────────│ clipping-worker  │────────▶│    AWS S3        │
-│    (NestJS)      │ webhook │    (FastAPI)     │ upload  │                  │
+│  viewcreator-api │◀────────│ viewcreator-     │────────▶│    AWS S3        │
+│    (NestJS)      │ webhook │ genesis (FastAPI)│ upload  │                  │
 │                  │         │                  │         │                  │
 └────────┬─────────┘         └──────────────────┘         └──────────────────┘
          │                            │
@@ -92,86 +53,204 @@ viewcreator-api                                          clipping-worker
 └──────────────────┘
 
 
-Webhook Events:
-───────────────
-1. job.started      → Job processing has begun
-2. job.progress     → Progress update (downloading, transcribing, etc.)
-3. job.completed    → Job finished successfully with output
-4. job.failed       → Job failed with error details
+Flow:
+──────
+1. API creates AiClippingAgentJob, submits to genesis with callback_url
+2. Genesis processes video, sends webhooks at each stage
+3. API receives webhooks, updates job record in PostgreSQL
+4. Frontend polls API for status (can be replaced with WebSockets later)
 ```
 
 ---
 
-## Webhook Payload Specification
+## Implemented Components
 
-### Common Fields
+### 1. Genesis Worker (viewcreator-genesis)
 
-All webhook payloads include these fields:
+#### WebhookService (`app/services/webhook_service.py`)
+
+```python
+# Key features:
+- Automatic retries with exponential backoff (3 retries, 1s base delay)
+- Throttling for progress webhooks (2s minimum interval)
+- Fire-and-forget for progress updates, awaited for terminal events
+- Standardized payload builder with WebhookPayload dataclass
+
+# Usage:
+webhook_service = get_webhook_service()
+payload = webhook_service.build_payload(
+    event="job.progress",
+    job_id=job_id,
+    status="running",
+    progress_percent=50,
+    current_step="Rendering clips...",
+)
+await webhook_service.send(callback_url, payload)
+```
+
+#### Pipeline Integration (`app/services/ai_clipping_pipeline.py`)
+
+```python
+# Modified components:
+- ClippingJobRequest: Added external_job_id field
+- AIClippingPipeline.__init__: Added webhook_service
+- AIClippingPipeline._update_progress(): Sends webhooks when callback_url set
+- AIClippingPipeline._send_webhook(): Maps JobStatus to webhook events
+
+# Webhook events sent at:
+- Job start: event="job.started"
+- Progress updates: event="job.progress" (throttled to every 2s)
+- Completion: event="job.completed" with full output
+- Failure: event="job.failed" with error message
+```
+
+#### Router Update (`app/routers/ai_clipping.py`)
+
+```python
+# ClippingJobRequest now includes:
+job_request = ClippingJobRequest(
+    video_url=video_source,
+    job_id=request.external_job_id,
+    external_job_id=request.external_job_id,  # For webhook identification
+    owner_user_id=request.owner_user_id,
+    callback_url=request.callback_url,
+    # ... other fields
+)
+```
+
+### 2. API Backend (viewcreator-api)
+
+#### WebhooksModule (`src/modules/webhooks/`)
+
+```
+src/modules/webhooks/
+├── dto/
+│   └── ai-clipping-webhook.dto.ts   # Validation DTOs
+├── webhooks.controller.ts            # POST /webhooks/ai-clipping
+├── webhooks.service.ts               # Process webhooks, update jobs
+└── webhooks.module.ts                # Module registration
+```
+
+#### WebhooksController
+
+```typescript
+@Controller('webhooks')
+export class WebhooksController {
+  @Post('ai-clipping')
+  @HttpCode(HttpStatus.OK)
+  async handleAiClippingWebhook(
+    @Body() payload: AiClippingWebhookDto,
+    @Headers('authorization') authorization?: string,
+  ): Promise<{ received: boolean }> {
+    // Validates signature (if WEBHOOK_SECRET configured)
+    // Processes webhook via service
+    // Returns 200 to prevent retries
+  }
+}
+```
+
+#### WebhooksService
+
+```typescript
+@Injectable()
+export class WebhooksService {
+  async processAiClippingWebhook(webhook: AiClippingWebhookDto): Promise<void> {
+    // Finds job by external_job_id
+    // Updates job record based on event type:
+    //   - job.started: Set startedAt, status=RUNNING
+    //   - job.progress: Update progressPercent, progressStage, clipsCompleted
+    //   - job.completed: Save clips, calculate credits, status=SUCCEEDED
+    //   - job.failed: Set errorMessage, status=FAILED
+  }
+}
+```
+
+#### AiClippingAgentJobsService Updates
+
+```typescript
+// New constructor properties:
+private readonly webhookBaseUrl: string | null;  // From API_BASE_URL env
+private readonly webhookSecret: string | null;   // From WEBHOOK_SECRET env
+
+// New method:
+private getWebhookCallbackUrl(): string | null {
+  if (!this.webhookBaseUrl) return null;
+  // Include /api prefix for NestJS global prefix
+  return `${this.webhookBaseUrl}/api/webhooks/ai-clipping`;
+}
+
+// Modified submitJob call:
+const callbackUrl = this.getWebhookCallbackUrl();
+const workerResponse = await this.clippingWorkerClient.submitJob({
+  // ... existing fields ...
+  callback_url: callbackUrl || undefined,
+  external_job_id: saved.id,
+  owner_user_id: userId,
+});
+
+// Note: Polling was removed - webhooks are the sole update mechanism
+```
+
+---
+
+## Webhook Payload Format
+
+### All Events
 
 ```typescript
 interface WebhookPayload {
-  // Event metadata
   event: 'job.started' | 'job.progress' | 'job.completed' | 'job.failed';
   timestamp: string;  // ISO 8601
-
-  // Job identification
-  job_id: string;
-  external_job_id?: string;  // ID from viewcreator-api
+  job_id: string;     // Genesis worker job ID
+  external_job_id?: string;  // API's AiClippingAgentJob.id
   owner_user_id?: string;
-
-  // Status
-  status: 'downloading' | 'transcribing' | 'planning' | 'detecting' | 'rendering' | 'uploading' | 'completed' | 'failed';
-  progress_percent: number;  // 0-100
-  current_step: string;      // Human-readable description
-
-  // Optional fields
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  progress_percent: number;
+  current_step: string;
+  clips_completed?: number;
+  total_clips?: number;
   error?: string;
-  output?: JobOutput;
+  output?: {
+    total_clips: number;
+    source_video_title?: string;
+    processing_time_seconds?: number;
+    clips: Array<{
+      clip_index: number;
+      s3_url: string;
+      duration_ms: number;
+      virality_score: number;
+      summary?: string;
+    }>;
+    transcript_url?: string;
+    plan_url?: string;
+  };
 }
 ```
 
-### Event: job.started
+### Event Examples
 
-Sent when job processing begins.
-
+**job.started:**
 ```json
 {
   "event": "job.started",
-  "timestamp": "2025-01-15T10:30:00Z",
-  "job_id": "abc-123-def-456",
-  "external_job_id": "user-submitted-id",
+  "timestamp": "2024-11-28T10:30:00.000Z",
+  "job_id": "abc-123",
+  "external_job_id": "550e8400-e29b-41d4-a716-446655440000",
   "owner_user_id": "user_789",
-  "status": "downloading",
-  "progress_percent": 0,
-  "current_step": "Starting job processing"
+  "status": "running",
+  "progress_percent": 5,
+  "current_step": "Downloading video..."
 }
 ```
 
-### Event: job.progress
-
-Sent at key pipeline stages.
-
+**job.progress:**
 ```json
 {
   "event": "job.progress",
-  "timestamp": "2025-01-15T10:31:00Z",
-  "job_id": "abc-123-def-456",
-  "external_job_id": "user-submitted-id",
-  "owner_user_id": "user_789",
-  "status": "transcribing",
-  "progress_percent": 15,
-  "current_step": "Transcribing audio with Whisper..."
-}
-```
-
-```json
-{
-  "event": "job.progress",
-  "timestamp": "2025-01-15T10:33:00Z",
-  "job_id": "abc-123-def-456",
-  "external_job_id": "user-submitted-id",
-  "owner_user_id": "user_789",
-  "status": "rendering",
+  "timestamp": "2024-11-28T10:32:00.000Z",
+  "job_id": "abc-123",
+  "external_job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "running",
   "progress_percent": 65,
   "current_step": "Rendering clip 3/5...",
   "clips_completed": 2,
@@ -179,941 +258,204 @@ Sent at key pipeline stages.
 }
 ```
 
-### Event: job.completed
-
-Sent when job finishes successfully.
-
+**job.completed:**
 ```json
 {
   "event": "job.completed",
-  "timestamp": "2025-01-15T10:38:00Z",
-  "job_id": "abc-123-def-456",
-  "external_job_id": "user-submitted-id",
-  "owner_user_id": "user_789",
-  "status": "completed",
+  "timestamp": "2024-11-28T10:38:00.000Z",
+  "job_id": "abc-123",
+  "external_job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "succeeded",
   "progress_percent": 100,
   "current_step": "Processing complete!",
   "clips_completed": 5,
   "total_clips": 5,
   "output": {
-    "job_id": "abc-123-def-456",
-    "source_video_url": "https://youtube.com/watch?v=...",
-    "source_video_title": "My Amazing Video",
-    "source_video_duration_seconds": 1847.5,
     "total_clips": 5,
+    "source_video_title": "My Amazing Video",
+    "processing_time_seconds": 482.5,
     "clips": [
       {
         "clip_index": 0,
-        "s3_url": "https://viewcreator-media.s3.amazonaws.com/clips/user_789/abc-123/clip_00.mp4",
+        "s3_url": "https://bucket.s3.amazonaws.com/clips/clip_00.mp4",
         "duration_ms": 45000,
-        "start_time_ms": 134200,
-        "end_time_ms": 179200,
         "virality_score": 0.92,
-        "layout_type": "screen_share",
-        "summary": "Key insight about product pricing strategy",
-        "tags": ["business", "pricing", "strategy"]
-      },
-      {
-        "clip_index": 1,
-        "s3_url": "https://viewcreator-media.s3.amazonaws.com/clips/user_789/abc-123/clip_01.mp4",
-        "duration_ms": 38000,
-        "start_time_ms": 445000,
-        "end_time_ms": 483000,
-        "virality_score": 0.87,
-        "layout_type": "talking_head",
-        "summary": "Emotional story about customer success",
-        "tags": ["story", "customers", "success"]
+        "summary": "Key insight about..."
       }
     ],
-    "transcript_url": "https://viewcreator-media.s3.amazonaws.com/clips/user_789/abc-123/transcript.json",
-    "plan_url": "https://viewcreator-media.s3.amazonaws.com/clips/user_789/abc-123/plan.json",
-    "processing_time_seconds": 482.5,
-    "created_at": "2025-01-15T10:38:00Z"
+    "transcript_url": "https://bucket.s3.amazonaws.com/transcript.json",
+    "plan_url": "https://bucket.s3.amazonaws.com/plan.json"
   }
 }
 ```
 
-### Event: job.failed
-
-Sent when job fails.
-
+**job.failed:**
 ```json
 {
   "event": "job.failed",
-  "timestamp": "2025-01-15T10:32:00Z",
-  "job_id": "abc-123-def-456",
-  "external_job_id": "user-submitted-id",
-  "owner_user_id": "user_789",
+  "timestamp": "2024-11-28T10:32:00.000Z",
+  "job_id": "abc-123",
+  "external_job_id": "550e8400-e29b-41d4-a716-446655440000",
   "status": "failed",
   "progress_percent": 15,
   "current_step": "Processing failed",
-  "error": "Failed to download video: Video is unavailable or private"
+  "error": "Failed to download video: Video is unavailable"
 }
 ```
 
 ---
 
-## Implementation Plan
+## Configuration
 
-### Phase 1: Webhook Service (Worker Side)
+### Environment Variables
 
-Create a new service to handle webhook delivery with retries.
+**viewcreator-api (.env):**
+```env
+# Required for webhook callback URL generation
+# The callback URL will be: {API_BASE_URL}/api/webhooks/ai-clipping
 
-**File: `app/services/webhook_service.py`**
+# Production (AWS):
+API_BASE_URL=https://api.viewcreator.ai
 
-```python
-"""
-Webhook service for sending job status updates to callback URLs.
-"""
+# Local development (API on host, genesis in Docker):
+API_BASE_URL=http://host.docker.internal:3001
 
-import asyncio
-import logging
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Optional
+# Local development (both on host):
+API_BASE_URL=http://localhost:3001
 
-import httpx
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass
-class WebhookResult:
-    """Result of a webhook delivery attempt."""
-    success: bool
-    status_code: Optional[int] = None
-    error: Optional[str] = None
-    attempts: int = 0
-
-
-class WebhookService:
-    """
-    Service for delivering webhook notifications with retry logic.
-
-    Features:
-    - Automatic retries with exponential backoff
-    - Non-blocking async delivery
-    - Configurable timeouts and retry limits
-    """
-
-    def __init__(
-        self,
-        timeout_seconds: float = 10.0,
-        max_retries: int = 3,
-        retry_delay_seconds: float = 1.0,
-    ):
-        self.timeout = timeout_seconds
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay_seconds
-
-    async def send(
-        self,
-        url: str,
-        payload: dict[str, Any],
-        headers: Optional[dict[str, str]] = None,
-    ) -> WebhookResult:
-        """
-        Send a webhook with automatic retries.
-
-        Args:
-            url: The callback URL to send the webhook to
-            payload: The JSON payload to send
-            headers: Optional additional headers
-
-        Returns:
-            WebhookResult with success status and details
-        """
-        if not url:
-            return WebhookResult(success=False, error="No callback URL provided")
-
-        default_headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "ViewCreator-ClippingWorker/2.0",
-            "X-Webhook-Event": payload.get("event", "unknown"),
-        }
-        if headers:
-            default_headers.update(headers)
-
-        last_error = None
-
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(
-                        url,
-                        json=payload,
-                        headers=default_headers,
-                    )
-
-                    if response.status_code < 300:
-                        logger.info(
-                            f"Webhook delivered successfully: {url} "
-                            f"(attempt {attempt}, status {response.status_code})"
-                        )
-                        return WebhookResult(
-                            success=True,
-                            status_code=response.status_code,
-                            attempts=attempt,
-                        )
-                    else:
-                        last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                        logger.warning(
-                            f"Webhook failed: {url} (attempt {attempt}, {last_error})"
-                        )
-
-            except httpx.TimeoutException:
-                last_error = "Request timed out"
-                logger.warning(f"Webhook timeout: {url} (attempt {attempt})")
-
-            except httpx.RequestError as e:
-                last_error = f"Request error: {str(e)}"
-                logger.warning(f"Webhook error: {url} (attempt {attempt}, {last_error})")
-
-            # Wait before retry (exponential backoff)
-            if attempt < self.max_retries:
-                delay = self.retry_delay * (2 ** (attempt - 1))
-                await asyncio.sleep(delay)
-
-        logger.error(f"Webhook failed after {self.max_retries} attempts: {url}")
-        return WebhookResult(
-            success=False,
-            error=last_error,
-            attempts=self.max_retries,
-        )
-
-    async def send_fire_and_forget(
-        self,
-        url: str,
-        payload: dict[str, Any],
-        headers: Optional[dict[str, str]] = None,
-    ) -> None:
-        """
-        Send a webhook without waiting for the result.
-
-        Use this for progress updates where delivery is best-effort.
-        """
-        asyncio.create_task(self.send(url, payload, headers))
-
-    def build_payload(
-        self,
-        event: str,
-        job_id: str,
-        status: str,
-        progress_percent: float,
-        current_step: str,
-        external_job_id: Optional[str] = None,
-        owner_user_id: Optional[str] = None,
-        clips_completed: int = 0,
-        total_clips: int = 0,
-        error: Optional[str] = None,
-        output: Optional[dict] = None,
-    ) -> dict[str, Any]:
-        """Build a standardized webhook payload."""
-        payload = {
-            "event": event,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "job_id": job_id,
-            "status": status,
-            "progress_percent": progress_percent,
-            "current_step": current_step,
-        }
-
-        if external_job_id:
-            payload["external_job_id"] = external_job_id
-        if owner_user_id:
-            payload["owner_user_id"] = owner_user_id
-        if clips_completed or total_clips:
-            payload["clips_completed"] = clips_completed
-            payload["total_clips"] = total_clips
-        if error:
-            payload["error"] = error
-        if output:
-            payload["output"] = output
-
-        return payload
+# Optional: Webhook authentication (future)
+WEBHOOK_SECRET=your-secret-key-here
 ```
 
-### Phase 2: Integrate with Pipeline
-
-Modify `AIClippingPipeline` to send webhooks at each stage.
-
-**File: `app/services/ai_clipping_pipeline.py` (modifications)**
-
-```python
-# Add to imports
-from app.services.webhook_service import WebhookService
-
-# Add to __init__
-class AIClippingPipeline:
-    def __init__(
-        self,
-        detection_pipeline: DetectionPipeline,
-        progress_callback: Optional[Callable[[ClippingJobProgress], None]] = None,
-    ):
-        # ... existing code ...
-        self.webhook_service = WebhookService()
-
-    # Modify _update_progress to include webhook delivery
-    def _update_progress(
-        self,
-        job_id: str,
-        status: JobStatus,
-        progress: float,
-        step: str,
-        callback_url: Optional[str] = None,  # NEW PARAMETER
-        external_job_id: Optional[str] = None,  # NEW PARAMETER
-        owner_user_id: Optional[str] = None,  # NEW PARAMETER
-        clips_completed: int = 0,
-        total_clips: int = 0,
-        error: Optional[str] = None,
-        output: Optional[dict] = None,  # NEW PARAMETER for completion
-    ) -> None:
-        """Update job progress via callback and webhook."""
-
-        # Existing in-memory progress callback
-        if self.progress_callback:
-            try:
-                self.progress_callback(ClippingJobProgress(
-                    job_id=job_id,
-                    status=status,
-                    progress_percent=progress,
-                    current_step=step,
-                    clips_completed=clips_completed,
-                    total_clips=total_clips,
-                    error=error,
-                ))
-            except Exception as e:
-                logger.warning(f"Progress callback failed: {e}")
-
-        # NEW: Send webhook notification
-        if callback_url:
-            # Determine event type
-            if status == JobStatus.COMPLETED:
-                event = "job.completed"
-            elif status == JobStatus.FAILED:
-                event = "job.failed"
-            elif progress == 0:
-                event = "job.started"
-            else:
-                event = "job.progress"
-
-            payload = self.webhook_service.build_payload(
-                event=event,
-                job_id=job_id,
-                status=status.value,
-                progress_percent=progress,
-                current_step=step,
-                external_job_id=external_job_id,
-                owner_user_id=owner_user_id,
-                clips_completed=clips_completed,
-                total_clips=total_clips,
-                error=error,
-                output=output,
-            )
-
-            # Fire and forget for progress, await for completion/failure
-            if event in ("job.completed", "job.failed"):
-                asyncio.create_task(self.webhook_service.send(callback_url, payload))
-            else:
-                self.webhook_service.send_fire_and_forget(callback_url, payload)
-```
-
-### Phase 3: Update Pipeline Calls
-
-Update all `_update_progress` calls in `process_video()` to pass the callback URL.
-
-```python
-async def process_video(self, request: ClippingJobRequest) -> ClippingJobResult:
-    # ... existing code ...
-
-    # Store callback info for all progress updates
-    callback_url = request.callback_url
-    external_job_id = request.external_job_id if hasattr(request, 'external_job_id') else None
-    owner_user_id = request.owner_user_id
-
-    # Step 1: Download video
-    self._update_progress(
-        job_id, JobStatus.DOWNLOADING, 5, "Downloading video...",
-        callback_url=callback_url,
-        external_job_id=external_job_id,
-        owner_user_id=owner_user_id,
-    )
-
-    # ... continue for all stages ...
-
-    # Final completion
-    self._update_progress(
-        job_id, JobStatus.COMPLETED, 100, "Processing complete!",
-        callback_url=callback_url,
-        external_job_id=external_job_id,
-        owner_user_id=owner_user_id,
-        clips_completed=total_clips,
-        total_clips=total_clips,
-        output=job_output.to_dict(),  # Include full output
-    )
-```
-
-### Phase 4: Add to Job Request Schema
-
-Ensure `callback_url` is properly passed through.
-
-**File: `app/services/ai_clipping_pipeline.py`**
-
-```python
-@dataclass
-class ClippingJobRequest:
-    """Request to process a video for AI clipping."""
-
-    video_url: str
-    job_id: Optional[str] = None
-    external_job_id: Optional[str] = None  # ADD THIS
-    owner_user_id: Optional[str] = None
-    max_clips: int = 5
-    min_clip_duration_seconds: int = 15
-    max_clip_duration_seconds: int = 90
-    duration_ranges: Optional[list[str]] = None
-    target_platform: str = "tiktok"
-    include_captions: bool = True
-    caption_style: Optional[CaptionStyle] = None
-    callback_url: Optional[str] = None  # ALREADY EXISTS - ensure it's used
-```
-
----
-
-## viewcreator-api Integration
-
-### Webhook Endpoint (NestJS)
-
-**File: `src/modules/webhooks/webhooks.controller.ts`**
-
-```typescript
-import { Controller, Post, Body, Headers, HttpCode, Logger } from '@nestjs/common';
-import { WebhooksService } from './webhooks.service';
-import { ClippingWebhookDto } from './dto/clipping-webhook.dto';
-
-@Controller('webhooks')
-export class WebhooksController {
-  private readonly logger = new Logger(WebhooksController.name);
-
-  constructor(private readonly webhooksService: WebhooksService) {}
-
-  @Post('clipping')
-  @HttpCode(200)
-  async handleClippingWebhook(
-    @Body() payload: ClippingWebhookDto,
-    @Headers('x-webhook-event') event: string,
-  ) {
-    this.logger.log(`Received webhook: ${event} for job ${payload.job_id}`);
-
-    await this.webhooksService.processClippingWebhook(payload);
-
-    return { received: true };
-  }
-}
-```
-
-**File: `src/modules/webhooks/dto/clipping-webhook.dto.ts`**
-
-```typescript
-import { IsString, IsNumber, IsOptional, IsObject, ValidateNested } from 'class-validator';
-import { Type } from 'class-transformer';
-
-class ClipArtifactDto {
-  @IsNumber()
-  clip_index: number;
-
-  @IsString()
-  s3_url: string;
-
-  @IsNumber()
-  duration_ms: number;
-
-  @IsNumber()
-  start_time_ms: number;
-
-  @IsNumber()
-  end_time_ms: number;
-
-  @IsNumber()
-  virality_score: number;
-
-  @IsString()
-  layout_type: string;
-
-  @IsOptional()
-  @IsString()
-  summary?: string;
-
-  @IsOptional()
-  tags?: string[];
-}
-
-class JobOutputDto {
-  @IsString()
-  job_id: string;
-
-  @IsString()
-  source_video_url: string;
-
-  @IsString()
-  source_video_title: string;
-
-  @IsNumber()
-  source_video_duration_seconds: number;
-
-  @IsNumber()
-  total_clips: number;
-
-  @ValidateNested({ each: true })
-  @Type(() => ClipArtifactDto)
-  clips: ClipArtifactDto[];
-
-  @IsOptional()
-  @IsString()
-  transcript_url?: string;
-
-  @IsOptional()
-  @IsString()
-  plan_url?: string;
-
-  @IsNumber()
-  processing_time_seconds: number;
-
-  @IsString()
-  created_at: string;
-}
-
-export class ClippingWebhookDto {
-  @IsString()
-  event: 'job.started' | 'job.progress' | 'job.completed' | 'job.failed';
-
-  @IsString()
-  timestamp: string;
-
-  @IsString()
-  job_id: string;
-
-  @IsOptional()
-  @IsString()
-  external_job_id?: string;
-
-  @IsOptional()
-  @IsString()
-  owner_user_id?: string;
-
-  @IsString()
-  status: string;
-
-  @IsNumber()
-  progress_percent: number;
-
-  @IsString()
-  current_step: string;
-
-  @IsOptional()
-  @IsNumber()
-  clips_completed?: number;
-
-  @IsOptional()
-  @IsNumber()
-  total_clips?: number;
-
-  @IsOptional()
-  @IsString()
-  error?: string;
-
-  @IsOptional()
-  @ValidateNested()
-  @Type(() => JobOutputDto)
-  output?: JobOutputDto;
-}
-```
-
-**File: `src/modules/webhooks/webhooks.service.ts`**
-
-```typescript
-import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { ClippingJob } from '../ai-clipping-agent/entities/clipping-job.entity';
-import { Clip } from '../ai-clipping-agent/entities/clip.entity';
-import { NotificationsService } from '../notifications/notifications.service';
-import { ClippingWebhookDto } from './dto/clipping-webhook.dto';
-
-@Injectable()
-export class WebhooksService {
-  private readonly logger = new Logger(WebhooksService.name);
-
-  constructor(
-    @InjectRepository(ClippingJob)
-    private readonly jobRepository: Repository<ClippingJob>,
-    @InjectRepository(Clip)
-    private readonly clipRepository: Repository<Clip>,
-    private readonly notificationsService: NotificationsService,
-  ) {}
-
-  async processClippingWebhook(payload: ClippingWebhookDto): Promise<void> {
-    const { event, job_id, external_job_id } = payload;
-
-    // Find the job by external_job_id (our internal ID)
-    const job = await this.jobRepository.findOne({
-      where: { id: external_job_id || job_id },
-      relations: ['user'],
-    });
-
-    if (!job) {
-      this.logger.warn(`Job not found for webhook: ${job_id}`);
-      return;
-    }
-
-    switch (event) {
-      case 'job.started':
-        await this.handleJobStarted(job, payload);
-        break;
-
-      case 'job.progress':
-        await this.handleJobProgress(job, payload);
-        break;
-
-      case 'job.completed':
-        await this.handleJobCompleted(job, payload);
-        break;
-
-      case 'job.failed':
-        await this.handleJobFailed(job, payload);
-        break;
-    }
-  }
-
-  private async handleJobStarted(job: ClippingJob, payload: ClippingWebhookDto) {
-    job.status = 'processing';
-    job.workerJobId = payload.job_id;
-    job.progressPercent = payload.progress_percent;
-    job.currentStep = payload.current_step;
-    await this.jobRepository.save(job);
-
-    // Notify user via WebSocket
-    await this.notificationsService.sendToUser(job.userId, {
-      type: 'clipping.started',
-      jobId: job.id,
-      message: 'Your video is being processed',
-    });
-  }
-
-  private async handleJobProgress(job: ClippingJob, payload: ClippingWebhookDto) {
-    job.progressPercent = payload.progress_percent;
-    job.currentStep = payload.current_step;
-    job.clipsCompleted = payload.clips_completed || 0;
-    job.totalClips = payload.total_clips || 0;
-    await this.jobRepository.save(job);
-
-    // Notify user via WebSocket (throttled to every 10%)
-    if (Math.floor(payload.progress_percent / 10) > Math.floor((job.progressPercent - 1) / 10)) {
-      await this.notificationsService.sendToUser(job.userId, {
-        type: 'clipping.progress',
-        jobId: job.id,
-        progressPercent: payload.progress_percent,
-        currentStep: payload.current_step,
-      });
-    }
-  }
-
-  private async handleJobCompleted(job: ClippingJob, payload: ClippingWebhookDto) {
-    job.status = 'completed';
-    job.progressPercent = 100;
-    job.currentStep = 'Completed';
-    job.completedAt = new Date();
-    job.processingTimeSeconds = payload.output?.processing_time_seconds;
-    job.sourceVideoTitle = payload.output?.source_video_title;
-    job.sourceVideoDurationSeconds = payload.output?.source_video_duration_seconds;
-    await this.jobRepository.save(job);
-
-    // Save clips
-    if (payload.output?.clips) {
-      for (const clipData of payload.output.clips) {
-        const clip = this.clipRepository.create({
-          jobId: job.id,
-          userId: job.userId,
-          clipIndex: clipData.clip_index,
-          s3Url: this.transformToCdnUrl(clipData.s3_url),
-          durationMs: clipData.duration_ms,
-          startTimeMs: clipData.start_time_ms,
-          endTimeMs: clipData.end_time_ms,
-          viralityScore: clipData.virality_score,
-          layoutType: clipData.layout_type,
-          summary: clipData.summary,
-          tags: clipData.tags,
-        });
-        await this.clipRepository.save(clip);
-      }
-    }
-
-    // Notify user
-    await this.notificationsService.sendToUser(job.userId, {
-      type: 'clipping.completed',
-      jobId: job.id,
-      clipCount: payload.output?.total_clips || 0,
-      message: `Your ${payload.output?.total_clips} clips are ready!`,
-    });
-  }
-
-  private async handleJobFailed(job: ClippingJob, payload: ClippingWebhookDto) {
-    job.status = 'failed';
-    job.error = payload.error;
-    job.failedAt = new Date();
-    await this.jobRepository.save(job);
-
-    // Notify user
-    await this.notificationsService.sendToUser(job.userId, {
-      type: 'clipping.failed',
-      jobId: job.id,
-      error: payload.error,
-      message: 'Video processing failed. Please try again.',
-    });
-  }
-
-  private transformToCdnUrl(s3Url: string): string {
-    // Transform S3 URL to CDN URL
-    // s3://bucket/key → https://cdn.viewcreator.ai/key
-    const cdnDomain = process.env.MEDIA_CDN_DOMAIN || 'cdn.viewcreator.ai';
-    return s3Url.replace(
-      /^https:\/\/[^\/]+\.s3\.[^\/]+\.amazonaws\.com\//,
-      `https://${cdnDomain}/`,
-    );
-  }
-}
-```
-
----
-
-## Submitting Jobs with Callback URL
-
-**viewcreator-api submitting a job:**
-
-```typescript
-// In your clipping job submission service
-async submitClippingJob(userId: string, request: CreateClippingJobDto) {
-  // Create job record first
-  const job = await this.jobRepository.save({
-    userId,
-    status: 'pending',
-    videoUrl: request.videoUrl,
-    // ... other fields
-  });
-
-  // Build callback URL
-  const callbackUrl = `${process.env.API_BASE_URL}/webhooks/clipping`;
-
-  // Submit to worker with callback
-  const response = await this.httpService.post(
-    `${process.env.CLIPPING_WORKER_URL}/ai-clipping/jobs`,
-    {
-      video_url: request.videoUrl,
-      callback_url: callbackUrl,  // ← The webhook URL
-      external_job_id: job.id,     // ← Our internal job ID
-      owner_user_id: userId,
-      max_clips: request.maxClips,
-      duration_ranges: request.durationRanges,
-      // ... other options
-    },
-  ).toPromise();
-
-  // Update job with worker job ID
-  job.workerJobId = response.data.job_id;
-  job.status = 'submitted';
-  await this.jobRepository.save(job);
-
-  return job;
-}
-```
-
----
-
-## Security Considerations
-
-### 1. Webhook Authentication
-
-Add a shared secret for webhook verification:
-
-```python
-# Worker: Add signature to webhook
-import hmac
-import hashlib
-
-def sign_payload(payload: dict, secret: str) -> str:
-    payload_str = json.dumps(payload, sort_keys=True)
-    return hmac.new(
-        secret.encode(),
-        payload_str.encode(),
-        hashlib.sha256
-    ).hexdigest()
-
-# Include in headers
-headers = {
-    "X-Webhook-Signature": sign_payload(payload, WEBHOOK_SECRET)
-}
-```
-
-```typescript
-// API: Verify signature
-function verifyWebhookSignature(payload: any, signature: string): boolean {
-  const expectedSignature = crypto
-    .createHmac('sha256', process.env.WEBHOOK_SECRET)
-    .update(JSON.stringify(payload))
-    .digest('hex');
-
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(expectedSignature),
-  );
-}
-```
-
-### 2. Rate Limiting
-
-Limit webhook calls per job to prevent abuse:
-
-```python
-# Worker: Throttle progress updates
-_last_webhook_time: dict[str, float] = {}
-MIN_WEBHOOK_INTERVAL = 5.0  # seconds
-
-def should_send_progress_webhook(job_id: str) -> bool:
-    now = time.time()
-    last = _last_webhook_time.get(job_id, 0)
-    if now - last >= MIN_WEBHOOK_INTERVAL:
-        _last_webhook_time[job_id] = now
-        return True
-    return False
-```
-
-### 3. Internal Network Only
-
-In production, webhooks should only be sent within the VPC:
-
-```
-Worker (ECS) ──── internal ALB ────▶ API (ECS)
-                  (not public)
-```
+**viewcreator-genesis:**
+No additional configuration needed. Callback URL is passed per-job.
+
+### Docker Networking Notes
+
+When genesis runs in Docker and the API runs on your host machine:
+- Use `host.docker.internal` instead of `localhost` in `API_BASE_URL`
+- This allows the Docker container to reach services on the host
+- On Linux, you may need to add `--add-host=host.docker.internal:host-gateway` to docker run
 
 ---
 
 ## Testing
 
-### Manual Testing
+### Manual Testing with webhook.site
 
 ```bash
-# 1. Submit job with callback URL
+# Submit job with external callback URL for debugging
 curl -X POST http://localhost:8000/ai-clipping/jobs \
   -H "Content-Type: application/json" \
   -d '{
     "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "callback_url": "https://webhook.site/your-unique-id",
-    "max_clips": 1
-  }'
-
-# 2. Watch webhooks arrive at webhook.site
-
-# 3. Or use a local endpoint
-curl -X POST http://localhost:8000/ai-clipping/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "callback_url": "http://localhost:3000/webhooks/clipping",
+    "external_job_id": "test-123",
     "max_clips": 1
   }'
 ```
 
-### Unit Tests
+### End-to-End Testing
 
-```python
-# tests/test_webhook_service.py
-import pytest
-from unittest.mock import AsyncMock, patch
-from app.services.webhook_service import WebhookService
+```bash
+# 1. Start API (ensure API_BASE_URL is set)
+cd viewcreator-api && npm run start:dev
 
-@pytest.mark.asyncio
-async def test_webhook_success():
-    service = WebhookService()
+# 2. Start Genesis worker
+cd viewcreator-genesis && uvicorn app.main:app --reload
 
-    with patch('httpx.AsyncClient.post', new_callable=AsyncMock) as mock_post:
-        mock_post.return_value.status_code = 200
+# 3. Submit job via API (webhooks will be sent automatically)
+curl -X POST http://localhost:3000/ai-clipping-agent/jobs \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "youtubeUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "requestedClipCount": 1
+  }'
 
-        result = await service.send(
-            url="https://example.com/webhook",
-            payload={"event": "job.started", "job_id": "123"},
-        )
-
-        assert result.success is True
-        assert result.attempts == 1
-
-@pytest.mark.asyncio
-async def test_webhook_retry_on_failure():
-    service = WebhookService(max_retries=3, retry_delay_seconds=0.1)
-
-    with patch('httpx.AsyncClient.post', new_callable=AsyncMock) as mock_post:
-        mock_post.return_value.status_code = 500
-
-        result = await service.send(
-            url="https://example.com/webhook",
-            payload={"event": "job.started", "job_id": "123"},
-        )
-
-        assert result.success is False
-        assert result.attempts == 3
+# 4. Monitor API logs for webhook reception
+# 5. Check job status in database
 ```
 
 ---
 
 ## Implementation Checklist
 
-- [ ] **Phase 1: Webhook Service**
-  - [ ] Create `app/services/webhook_service.py`
-  - [ ] Add retry logic with exponential backoff
-  - [ ] Add payload builder helper
+### Completed ✅
 
-- [ ] **Phase 2: Pipeline Integration**
-  - [ ] Modify `_update_progress()` to accept callback_url
-  - [ ] Add webhook calls at each pipeline stage
-  - [ ] Ensure output is included in completion webhook
+#### Genesis Worker (viewcreator-genesis)
+- [x] Create `app/services/webhook_service.py`
+- [x] Add WebhookPayload and WebhookResult dataclasses
+- [x] Implement retry logic with exponential backoff
+- [x] Add throttling for progress webhooks
+- [x] Add payload builder helper
+- [x] Integrate with `AIClippingPipeline._update_progress()`
+- [x] Add `_send_webhook()` method to pipeline
+- [x] Map JobStatus to webhook event types
+- [x] Add `external_job_id` to ClippingJobRequest
+- [x] Pass external_job_id through router
 
-- [ ] **Phase 3: API Integration**
-  - [ ] Create webhook controller in viewcreator-api
-  - [ ] Create DTOs for webhook payloads
-  - [ ] Create webhook service to process events
-  - [ ] Update job status in database
-  - [ ] Send WebSocket notifications to users
+#### API Backend (viewcreator-api)
+- [x] Create `src/modules/webhooks/` module
+- [x] Create `WebhooksController` with `/api/webhooks/ai-clipping` endpoint
+- [x] Create `AiClippingWebhookDto` for validation
+- [x] Create `WebhooksService` to process events
+- [x] Register module in `app.module.ts`
+- [x] Update `AiClippingAgentJobsService` with webhook config
+- [x] Add `getWebhookCallbackUrl()` method (includes `/api` prefix)
+- [x] Pass `callback_url` in submitJob call
+- [x] Remove polling system (webhooks only)
 
-- [ ] **Phase 4: Security**
-  - [ ] Add webhook signature verification
-  - [ ] Implement rate limiting
-  - [ ] Configure internal-only networking in AWS
+### Pending ⏳
 
-- [ ] **Phase 5: Testing**
-  - [ ] Unit tests for webhook service
-  - [ ] Integration tests with mock receiver
-  - [ ] End-to-end test with real job
+#### Security (Phase 4)
+- [ ] Add HMAC signature generation in genesis
+- [ ] Add signature verification in API controller
+- [ ] Configure internal-only networking in AWS (VPC)
+- [ ] Add rate limiting on webhook endpoint
+
+#### Real-time Notifications (Phase 5)
+- [ ] Create `NotificationsService` for WebSocket support
+- [ ] Send progress updates to connected clients
+- [ ] Throttle notifications (every 10% progress)
+
+#### Testing (Phase 6)
+- [ ] Unit tests for `WebhookService` (Python)
+- [ ] Unit tests for `WebhooksService` (NestJS)
+- [ ] Integration tests with mock worker
+- [ ] End-to-end test with real clipping job
 
 ---
 
-## Summary
+## Benefits
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         WEBHOOK IMPLEMENTATION                                   │
-│                                                                                  │
-│  Benefits:                                                                       │
-│  ✅ Real-time status updates (no polling delay)                                 │
-│  ✅ 95% reduction in HTTP requests                                              │
-│  ✅ Better user experience (instant progress)                                   │
-│  ✅ Reduced server load on both services                                        │
-│  ✅ Cleaner separation of concerns                                              │
-│                                                                                  │
-│  Implementation Effort:                                                          │
-│  • Worker side: ~100 lines of new code                                          │
-│  • API side: ~200 lines of new code                                             │
-│  • Testing: ~50 lines                                                           │
-│  • Total: ~1-2 days of work                                                     │
-│                                                                                  │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+| Aspect | Before (Polling) | After (Webhooks) |
+|--------|------------------|------------------|
+| HTTP requests per job | 50-100+ | 3-6 |
+| Status update latency | 5-10 seconds | Instant |
+| Server load | High | Low |
+| User experience | Laggy progress | Real-time |
+| Scalability | Poor | Excellent |
+
+---
+
+## File Changes Summary
+
+### viewcreator-genesis
+
+| File | Change |
+|------|--------|
+| `app/services/webhook_service.py` | **NEW** - Webhook delivery service |
+| `app/services/ai_clipping_pipeline.py` | Modified - Added webhook integration |
+| `app/routers/ai_clipping.py` | Modified - Pass external_job_id |
+
+### viewcreator-api
+
+| File | Change |
+|------|--------|
+| `src/modules/webhooks/webhooks.module.ts` | **NEW** - Module definition |
+| `src/modules/webhooks/webhooks.controller.ts` | **NEW** - Webhook endpoint |
+| `src/modules/webhooks/webhooks.service.ts` | **NEW** - Process webhooks |
+| `src/modules/webhooks/dto/ai-clipping-webhook.dto.ts` | **NEW** - Validation DTOs |
+| `src/modules/ai-clipping-agent/ai-clipping-agent-jobs.service.ts` | Modified - Add callback URL |
+| `src/app.module.ts` | Modified - Import WebhooksModule |

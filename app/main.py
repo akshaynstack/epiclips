@@ -1,7 +1,7 @@
 """
-FastAPI application entry point for the Clipping Detection Worker.
+FastAPI application entry point for ViewCreator Genesis.
 
-This service provides:
+Genesis is ViewCreator's media processing engine, providing:
 1. Video detection (YOLO face detection, MediaPipe pose estimation, DeepSORT tracking)
 2. Full AI clipping pipeline (transcription, intelligence planning, rendering)
 """
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global face_detector, pose_estimator, detection_pipeline, job_semaphore
 
     settings = get_settings()
-    logger.info("Starting Clipping Detection Worker...")
+    logger.info("Starting ViewCreator Genesis...")
 
     # Create temp directory
     os.makedirs(settings.temp_directory, exist_ok=True)
@@ -111,12 +111,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Verify external tools
     _verify_external_tools()
 
-    logger.info("All models loaded. Worker ready to accept requests.")
+    logger.info("All models loaded. Genesis ready to accept requests.")
 
     yield
 
     # Cleanup on shutdown
-    logger.info("Shutting down Clipping Detection Worker...")
+    logger.info("Shutting down ViewCreator Genesis...")
     face_detector = None
     pose_estimator = None
     detection_pipeline = None
@@ -149,9 +149,11 @@ def _verify_external_tools():
 
 # Create FastAPI application
 app = FastAPI(
-    title="ViewCreator Clipping Worker",
+    title="ViewCreator Genesis",
     description="""
-AI-powered video clipping service for ViewCreator.
+Genesis - ViewCreator's media processing engine.
+
+AI-powered video processing and content creation service.
 
 ## Features
 
@@ -199,7 +201,7 @@ async def root():
     """Root endpoint with basic info."""
     settings = get_settings()
     return {
-        "service": "viewcreator-clipping-worker",
+        "service": "viewcreator-genesis",
         "version": "2.0.0",
         "status": "running",
         "features": {

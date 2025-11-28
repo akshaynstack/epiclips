@@ -11,6 +11,8 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, HttpUrl
 
+from app.auth import verify_api_key
+
 # Duration range type for multi-select
 DurationRangeType = Literal["short", "medium", "long"]
 
@@ -218,6 +220,7 @@ async def submit_clipping_job(
     request: ClipJobSubmitRequest,
     background_tasks: BackgroundTasks,
     detection_pipeline: DetectionPipeline = Depends(get_detection_pipeline),
+    _: None = Depends(verify_api_key),  # Require API key authentication
 ) -> ClipJobSubmitResponse:
     """
     Submit a new AI clipping job.
@@ -299,6 +302,7 @@ async def submit_clipping_job(
     job_request = ClippingJobRequest(
         video_url=video_source,
         job_id=request.external_job_id,  # Use external ID if provided
+        external_job_id=request.external_job_id,  # Track for webhooks
         owner_user_id=request.owner_user_id,  # Pass user ID for S3 key scoping
         max_clips=request.max_clips,
         min_clip_duration_seconds=min_duration,
@@ -413,7 +417,10 @@ async def get_job_status(job_id: str) -> ClipJobStatusResponse:
 
 
 @router.delete("/jobs/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def cancel_job(job_id: str) -> None:
+async def cancel_job(
+    job_id: str,
+    _: None = Depends(verify_api_key),  # Require API key authentication
+) -> None:
     """
     Cancel a pending or running job.
     
