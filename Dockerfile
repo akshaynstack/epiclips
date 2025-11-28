@@ -24,8 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
+# First install CPU-only PyTorch to avoid 4GB of CUDA dependencies
+# (ultralytics requires torch, but we only need CPU inference)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install \
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Download YOLO model weights directly (avoids installing ultralytics + PyTorch + CUDA = 4GB)
 # The model file is only 6MB - no need to install the full package just to download it

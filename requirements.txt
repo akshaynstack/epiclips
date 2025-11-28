@@ -10,12 +10,15 @@ boto3==1.34.0
 
 # Video/Image Processing
 opencv-python-headless==4.9.0.80
-numpy==1.26.3
+numpy>=1.26.3,<2.0          # Pin to 1.x for compatibility with opencv/mediapipe
 Pillow==10.2.0
 ffmpeg-python==0.2.0        # FFmpeg bindings for rendering
+scipy>=1.12.0,<1.14         # Pin to version compatible with numpy 1.x
 
 # ML Models
-ultralytics==8.1.0          # YOLOv8
+# NOTE: torch is installed separately with CPU-only build (see Dockerfile)
+# to avoid downloading 4GB of CUDA dependencies
+ultralytics==8.1.0          # YOLOv8 (uses torch installed above)
 mediapipe==0.10.9           # Pose estimation
 deep-sort-realtime==1.3.2   # Object tracking
 
