@@ -79,21 +79,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender1 \
     libgomp1 \
-    # For healthcheck
+    # For healthcheck and Node.js installation
     curl \
+    gnupg \
     # Fonts for caption rendering (viral-style subtitles)
     fonts-dejavu-core \
     fonts-liberation \
     fontconfig \
     # yt-dlp dependencies
     ca-certificates \
-    # Node.js for yt-dlp YouTube extraction (required since late 2024)
-    # YouTube now requires a JavaScript runtime for extracting video info
-    nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     # Refresh font cache for caption rendering
     && fc-cache -fv
+
+# Install Node.js 20 LTS for yt-dlp YouTube extraction (required since late 2024)
+# Using NodeSource for a proper Node.js installation that yt-dlp can detect
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version
 
 # Install yt-dlp binary (standalone, doesn't require Python dependencies)
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
