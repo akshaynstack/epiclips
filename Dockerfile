@@ -27,12 +27,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Download YOLO model weights
+# Download YOLO model weights directly (avoids installing ultralytics + PyTorch + CUDA = 4GB)
+# The model file is only 6MB - no need to install the full package just to download it
 RUN mkdir -p /models && \
-    pip install --no-cache-dir ultralytics && \
-    python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" && \
-    cp ~/.config/ultralytics/yolov8n.pt /models/ || \
-    curl -L -o /models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt
+    curl -L -o /models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
