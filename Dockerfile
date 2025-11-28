@@ -23,16 +23,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
-# First install CPU-only PyTorch to avoid 4GB of CUDA dependencies
-# (ultralytics requires torch, but we only need CPU inference)
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install \
-    torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Create virtual environment - this ensures pip sees already-installed packages
+# when resolving dependencies (unlike --prefix which causes path discovery issues)
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Download YOLO model weights directly (avoids installing ultralytics + PyTorch + CUDA = 4GB)
-# The model file is only 6MB - no need to install the full package just to download it
+# Copy requirements and install Python dependencies
+# Install CPU-only PyTorch FIRST to prevent ultralytics from pulling CUDA version
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Download YOLO model weights
 RUN mkdir -p /models && \
     curl -L -o /models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
 
@@ -50,6 +54,9 @@ LABEL version="2.0.0"
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
+    # Virtual environment (copied from builder)
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" \
     # App config
     APP_HOME=/app \
     TEMP_DIRECTORY=/tmp/genesis \
@@ -92,8 +99,8 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Copy installed packages from builder
-COPY --from=builder /install /usr/local
+# Copy virtual environment from builder (contains all Python packages)
+COPY --from=builder /opt/venv /opt/venv
 
 # Copy YOLO model weights
 COPY --from=builder /models /app/models
