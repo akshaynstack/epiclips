@@ -8,7 +8,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECS_CLUSTER: viewcreator-prod
+  ECS_CLUSTER: viewcreator-prod-cluster
   ECS_SERVICE: viewcreator-prod-genesis
   ECR_REPOSITORY: viewcreator-prod-genesis
 
