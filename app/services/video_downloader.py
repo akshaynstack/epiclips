@@ -75,22 +75,18 @@ class VideoDownloaderService:
         self.ytdlp_path = self._resolve_ytdlp_path()
         self._s3_client: Optional[boto3.client] = None
         
-        # Diagnostic logging for Node.js (required for yt-dlp)
-        node_path = shutil.which("node")
-        if node_path:
-            logger.info(f"Node.js found at: {node_path}")
-            try:
-                version = subprocess.check_output(["node", "--version"], text=True).strip()
-                logger.info(f"Node.js version: {version}")
-            except Exception as e:
-                logger.warning(f"Failed to check node version: {e}")
-        else:
-            logger.warning("Node.js NOT found in PATH! yt-dlp may fail for YouTube downloads.")
-            logger.info(f"Current PATH: {os.environ.get('PATH', '')}")
-            # Try to find it in common locations
-            for path in ["/usr/bin/node", "/usr/local/bin/node", "/bin/node"]:
-                if os.path.exists(path):
-                    logger.info(f"Node found at {path} but not in PATH")
+        # Diagnostic logging for JS runtimes (required for yt-dlp)
+        for runtime in ["node", "deno"]:
+            path = shutil.which(runtime)
+            if path:
+                logger.info(f"{runtime} found at: {path}")
+                try:
+                    version = subprocess.check_output([runtime, "--version"], text=True).strip()
+                    logger.info(f"{runtime} version: {version}")
+                except Exception as e:
+                    logger.warning(f"Failed to check {runtime} version: {e}")
+            else:
+                logger.warning(f"{runtime} NOT found in PATH!")
 
         logger.info(f"VideoDownloaderService initialized with yt-dlp at: {self.ytdlp_path}")
 
@@ -458,6 +454,8 @@ class VideoDownloaderService:
         """Build yt-dlp command arguments."""
         args = [
             self.ytdlp_path,
+            "--js-runtimes", "deno",
+            "--remote-components", "ejs:github",
             "--no-playlist",
             "--no-progress",
             "--newline",
@@ -492,6 +490,8 @@ class VideoDownloaderService:
         """Get video metadata without downloading."""
         args = [
             self.ytdlp_path,
+            "--js-runtimes", "deno",
+            "--remote-components", "ejs:github",
             "--no-download",
             "--dump-json",
             "--no-playlist",

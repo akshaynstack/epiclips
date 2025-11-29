@@ -88,6 +88,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fontconfig \
     # yt-dlp dependencies
     ca-certificates \
+    unzip \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
     # Refresh font cache for caption rendering
@@ -110,6 +111,10 @@ RUN chmod +x /usr/bin/node || true
 # Install yt-dlp binary (standalone, doesn't require Python dependencies)
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
+
+# Install Deno (JS runtime for yt-dlp)
+ENV DENO_INSTALL="/usr/local"
+RUN curl -fsSL https://deno.land/install.sh | sh
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
