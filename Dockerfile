@@ -98,7 +98,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && node --version
+    && node --version \
+    && which node
+
+# Ensure 'node' command exists (symlink nodejs -> node if needed)
+RUN if [ ! -f /usr/bin/node ] && [ -f /usr/bin/nodejs ]; then ln -s /usr/bin/nodejs /usr/bin/node; fi
+
+# Verify node is executable
+RUN chmod +x /usr/bin/node || true
 
 # Install yt-dlp binary (standalone, doesn't require Python dependencies)
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
