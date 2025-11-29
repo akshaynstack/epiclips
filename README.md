@@ -741,6 +741,8 @@ Content-Type: application/json
 
 The application uses a minimal set of environment variables. All processing settings (rendering, detection, captions, etc.) are hardcoded in the application for consistency.
 
+**Note:** For details on configuring proxies to bypass YouTube blocking, see [YouTube Proxy Configuration](docs/YOUTUBE_PROXY_CONFIGURATION.md).
+
 ```env
 # ═══════════════════════════════════════════════════════════════
 # APPLICATION

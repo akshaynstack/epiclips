@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     genesis_api_key: Optional[str] = None  # API key for authenticating incoming requests
     genesis_webhook_secret: Optional[str] = None  # Secret for signing outgoing webhooks
 
+    # yt-dlp Configuration
+    ytdlp_proxy: Optional[str] = None  # Proxy URL (e.g., http://user:pass@host:port)
+
     # ============================================================
     # HARDCODED SETTINGS (not configurable via env vars)
     # ============================================================

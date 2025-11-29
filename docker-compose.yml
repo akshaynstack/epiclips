@@ -36,6 +36,9 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - INTELLIGENCE_MODEL=${INTELLIGENCE_MODEL:-google/gemini-2.0-flash-001}
 
+      # yt-dlp Configuration
+      - YTDLP_PROXY=${YTDLP_PROXY:-}
+
       # Security - API Authentication (must match viewcreator-api configuration)
       - GENESIS_API_KEY=${GENESIS_API_KEY:-}
       - GENESIS_WEBHOOK_SECRET=${GENESIS_WEBHOOK_SECRET:-}
