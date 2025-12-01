@@ -19,8 +19,18 @@ from app.services.transcription_service import TranscriptSegment, TranscriptionR
 logger = logging.getLogger(__name__)
 
 
-# Layout types for clips
+# Layout types for clips (internal representation)
+# - screen_share: Split layout with screen on top, face on bottom
+# - talking_head: Face-focused dynamic crop that follows the speaker
 ClipLayoutType = Literal["talking_head", "screen_share"]
+
+# Map user-facing layout IDs to internal layout types
+LAYOUT_TYPE_MAP = {
+    "split_screen": "screen_share",    # User-facing -> internal
+    "talking_head": "talking_head",
+    # Backwards compatibility for internal types used directly
+    "screen_share": "screen_share",
+}
 
 
 @dataclass
@@ -97,10 +107,11 @@ class IntelligencePlannerService:
         duration_ranges: Optional[list[str]] = None,
         target_platform: str = "tiktok",
         frames: Optional[list[VisionFrame]] = None,
+        layout_type: str = "split_screen",
     ) -> ClipPlanResponse:
         """
         Plan viral clips from video content.
-        
+
         Args:
             transcript_result: TranscriptionResult from transcription service
             video_metadata: Optional video metadata
@@ -110,30 +121,35 @@ class IntelligencePlannerService:
             duration_ranges: Optional list of selected duration ranges ('short', 'medium', 'long')
             target_platform: Target platform (tiktok, youtube_shorts, instagram_reels)
             frames: Optional sampled video frames for vision analysis
-            
+            layout_type: Layout type for clip rendering (split_screen, talking_head)
+
         Returns:
             ClipPlanResponse with identified clips
         """
         transcript = transcript_result.segments if transcript_result else []
         frames = frames or []
-        
+
         if not transcript and not frames:
             logger.warning("No transcript or frames provided for clip planning")
             return ClipPlanResponse(segments=[], total_clips=0, target_platform=target_platform, insights="No content provided for analysis")
-        
+
         clip_count = max_clips or self.settings.max_suggested_clips
-        
+
+        # Map user-facing layout type to internal type
+        internal_layout_type = LAYOUT_TYPE_MAP.get(layout_type, "screen_share")
+
         logger.info(
             f"Planning clips: {len(transcript)} transcript segments, "
             f"{len(frames)} frames, requesting {clip_count} clips, "
-            f"duration_ranges={duration_ranges}"
+            f"duration_ranges={duration_ranges}, layout_type={layout_type} (internal: {internal_layout_type})"
         )
-        
+
         # Store for use in response
         self._current_target_platform = target_platform
         self._current_min_duration = min_duration_seconds
         self._current_max_duration = max_duration_seconds
         self._current_duration_ranges = duration_ranges
+        self._current_layout_type = internal_layout_type
         
         # Build prompts
         system_prompt = self._build_system_prompt(clip_count, min_duration_seconds, max_duration_seconds, duration_ranges)
@@ -425,9 +441,8 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
                 else:
                     logger.warning(f"Filtering invalid clip with duration {duration}s (start={start}, end={end})")
             
-            # Build ClipPlanSegment objects
-            # NOTE: Always default to "screen_share" to match epiriumaiclips behavior
-            # The OpusClip-style split-screen layout works best for most content
+            # Build ClipPlanSegment objects using the user-selected layout type
+            layout_type = getattr(self, '_current_layout_type', 'screen_share')
             clips = []
             for clip in valid_clips_data:
                 start_sec = clip.get("start_time", 0)
@@ -437,7 +452,7 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
                     start_time_ms=int(start_sec * 1000),
                     end_time_ms=int(end_sec * 1000),
                     virality_score=float(clip.get("virality_score", 0.5)),
-                    layout_type="screen_share",  # Always use screen_share (epiriumaiclips style)
+                    layout_type=layout_type,
                     summary=clip.get("summary"),
                     tags=clip.get("tags", []),
                 ))

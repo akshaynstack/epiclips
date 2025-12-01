@@ -242,41 +242,51 @@ Style: Highlight,{style.font_name},{style.font_size},{highlight_color},{primary_
         """Generate events for a word group with word-by-word highlighting."""
         events: list[str] = []
         words = group.words
-        
+
         # For each word in the group, create an event showing all words
         # but with the current word highlighted
         for i, current_word in enumerate(words):
             word_start = max(0, current_word.start_time_ms - clip_start_ms)
-            word_end = max(0, current_word.end_time_ms - clip_start_ms)
-            
+
+            # FIX: To prevent overlapping dialogue events (double lines),
+            # each word's end time should be the start of the next word.
+            # This ensures seamless transitions without overlap.
+            if i < len(words) - 1:
+                # End this word's event when the next word starts
+                next_word_start = max(0, words[i + 1].start_time_ms - clip_start_ms)
+                word_end = next_word_start
+            else:
+                # Last word in group - use its actual end time
+                word_end = max(0, current_word.end_time_ms - clip_start_ms)
+
             if word_end <= word_start:
                 continue
-            
+
             # Build display text with current word highlighted
             display_parts: list[str] = []
-            
+
             for j, word in enumerate(words):
                 word_text = word.word.strip()
                 if style.uppercase:
                     word_text = word_text.upper()
-                
+
                 if j == i:
                     # Current word - use highlight style
                     display_parts.append(f"{{\\rHighlight}}{word_text}{{\\rDefault}}")
                 else:
                     display_parts.append(word_text)
-            
+
             # Wrap into lines
             lines = self._wrap_words(display_parts, style.max_words_per_line)
             display_text = "\\N".join(lines)
-            
+
             start_time = self._format_ass_time(word_start)
             end_time = self._format_ass_time(word_end)
-            
+
             events.append(
                 f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{display_text}"
             )
-        
+
         return events
 
     def _group_words(

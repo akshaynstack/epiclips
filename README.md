@@ -40,7 +40,7 @@ ViewCreator Genesis is the media processing engine that handles the computationa
 | Face Detection | Multi-tier (MediaPipe + YOLO + Haar) | 60+ FPS with fallbacks |
 | Pose Estimation | MediaPipe | 30+ FPS |
 | Object Tracking | DeepSORT | Persistent IDs |
-| Video Rendering | FFmpeg H.264 (OpusClip-style) | 2-region split + overlay |
+| Video Rendering | FFmpeg H.264 | 2-region split + overlay |
 | Caption Style | ASS Subtitles (overlay) | Word-by-word highlight |
 
 ---
@@ -341,7 +341,7 @@ Output: CropTimeline (keyframes with center positions)
         └───────────┘
 ```
 
-#### Screen Share Mode (OpusClip-Style 2-Region Layout)
+#### Screen Share Mode (Split Layout - Screen Top, Face Bottom)
 ```
 ┌────────────────────────────────┐
 │     Original 16:9 Frame        │
@@ -367,7 +367,7 @@ Output: CropTimeline (keyframes with center positions)
         └───────────┘
 ```
 
-**OpusClip-Style Features:**
+**Split Layout Features:**
 - **2-Region Layout**: Screen (50%) + Face (50%), no separate caption band
 - **Captions Overlay**: ASS subtitles render directly on video content
 - **Tight Face Crop**: 2x detected face size, capped at 1/3 of source
@@ -404,8 +404,36 @@ def build_crop_timeline(detection_frames, segment) -> CropTimeline:
 Generates viral-style ASS subtitles with word-by-word highlighting.
 
 ```
-Input:  TranscriptSegments + clip timing + style config
+Input:  TranscriptSegments + clip timing + style config (or preset)
 Output: .ass subtitle file
+```
+
+**Caption Presets:**
+
+Users can select from 5 pre-configured caption styles:
+
+| Preset | Primary Color | Highlight Color | Description |
+|--------|---------------|-----------------|-------------|
+| `viral_gold` | White | Gold (#FFD700) | Classic viral caption style |
+| `clean_white` | White | Blue (#3B82F6) | Clean, professional look |
+| `neon_pop` | Cyan (#00FFFF) | Magenta (#FF00FF) | Bold, eye-catching neon |
+| `bold_boxed` | White | Red (#EF4444) | High contrast red emphasis |
+| `gradient_glow` | White | Green (#22C55E) | Fresh green highlight |
+
+**Caption Preset Configuration:**
+```python
+# config.py - get_caption_preset() returns CaptionStyle for preset ID
+
+# Example preset configuration
+CaptionPreset.VIRAL_GOLD → CaptionStyle(
+    primary_color="#FFFFFF",
+    highlight_color="#FFD700",
+    font_name="Arial Black",
+    font_size=72,
+    bold=True,
+    uppercase=True,
+    ...
+)
 ```
 
 **Caption Style System:**
@@ -426,12 +454,17 @@ class CaptionStyle:
 ```
 
 **Word-by-Word Highlighting:**
+
+Each word is highlighted sequentially as it's spoken. Events are timed so each word's display ends exactly when the next word begins, ensuring seamless transitions with no overlapping lines.
+
 ```
 Time: 0.0s  → "THIS is how you"        (THIS highlighted)
 Time: 0.3s  → "This IS how you"        (IS highlighted)
 Time: 0.5s  → "This is HOW you"        (HOW highlighted)
 Time: 0.7s  → "This is how YOU"        (YOU highlighted)
 ```
+
+**Implementation Note:** Word timestamps from transcription services can overlap. The caption generator ensures each word's event ends when the next word starts to prevent double-line display issues.
 
 ---
 
@@ -449,7 +482,7 @@ Output: RenderResult (MP4 file path + metadata)
 | Mode | Description | Use Case |
 |------|-------------|----------|
 | `focus_mode` | Single dynamic crop following face | Talking head content |
-| `opusclip_mode` | 2-region split (50% screen + 50% face) with captions overlay | Screen share with speaker (default) |
+| `split_mode` | 2-region split (50% screen + 50% face) with captions overlay | Screen share with speaker (default) |
 | `stack_mode` | Legacy split screen (55% screen + 45% face) | Fallback mode |
 | `static_mode` | Center crop, no motion | Fallback when no faces |
 
@@ -625,6 +658,37 @@ viewcreator-genesis/
 
 ### AI Clipping Endpoints
 
+#### Get Caption Presets
+
+```http
+GET /ai-clipping/caption-presets
+```
+
+**Response:**
+```json
+[
+  {
+    "id": "viral_gold",
+    "name": "Viral Gold",
+    "description": "Classic viral caption style with gold highlight",
+    "preview_colors": {
+      "primary": "#FFFFFF",
+      "highlight": "#FFD700"
+    }
+  },
+  {
+    "id": "clean_white",
+    "name": "Clean White",
+    "description": "Clean, professional look with blue accent",
+    "preview_colors": {
+      "primary": "#FFFFFF",
+      "highlight": "#3B82F6"
+    }
+  }
+  // ... more presets
+]
+```
+
 #### Submit Job
 
 ```http
@@ -637,6 +701,7 @@ Content-Type: application/json
   "duration_ranges": ["short", "medium"],
   "target_platform": "tiktok",
   "include_captions": true,
+  "caption_preset": "viral_gold",
   "caption_style": {
     "font_family": "Arial Black",
     "font_size": 72,
@@ -647,6 +712,9 @@ Content-Type: application/json
   "external_job_id": "uuid-from-api",
   "owner_user_id": "user-123"
 }
+```
+
+**Note:** `caption_preset` takes precedence over `caption_style` if both are provided. Use presets for consistent styling or custom `caption_style` for full control.
 ```
 
 **Response:**
@@ -789,7 +857,7 @@ All other settings are hardcoded in `app/config.py` for consistency:
 | Output Resolution | 1080x1920 | 9:16 portrait video |
 | FFmpeg Preset | veryfast | Encoding speed |
 | FFmpeg CRF | 20 | Quality level |
-| OpusClip Layout | 50% / 50% | Screen (top) / Face (bottom) |
+| Split Layout | 50% / 50% | Screen (top) / Face (bottom) |
 | Transcription Model | whisper-large-v3-turbo | Groq Whisper model |
 | Gemini Model | google/gemini-2.5-flash | AI planning model |
 | Face Detection | Multi-tier fallback | MediaPipe + YOLO + Haar |
@@ -1175,6 +1243,7 @@ docker-compose up -d --build
 | `Black screen in output` | S3 URL not transformed | Check CDN URL transformation |
 | `Crop too big error` | Video dimension mismatch | Service auto-corrects via ffprobe dimension verification |
 | `Face not filling bottom` | Crop size issue | Crop capped at 1/3 of source for 3x+ scale-up |
+| `Double caption lines` | Overlapping word timestamps | Fixed: word events end when next word starts (see caption_generator.py) |
 
 ---
 

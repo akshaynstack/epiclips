@@ -132,7 +132,7 @@ class DetectionPipeline:
         Process a local video file for face detection.
         
         Uses multi-tier detection (MediaPipe → YOLO → Haar) with outlier filtering
-        for robust face tracking based on epiriumaiclips architecture.
+        for robust face tracking.
         
         Returns a dict with 'frames' containing detection data.
         """

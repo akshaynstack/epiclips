@@ -29,6 +29,267 @@ class CaptionStyle:
     uppercase: bool = True
 
 
+# ============================================================
+# LAYOUT PRESETS
+# ============================================================
+
+class LayoutType:
+    """
+    Available layout type identifiers for clip rendering.
+
+    Users can select from these layouts to control how clips are composed.
+    """
+    SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (50/50 split)
+    TALKING_HEAD = "talking_head"    # Face-focused single crop that follows the speaker
+
+
+def get_layout_preset(layout_id: str) -> dict:
+    """
+    Get layout configuration for a given layout ID.
+
+    Args:
+        layout_id: One of the LayoutType constants
+
+    Returns:
+        Layout configuration dict
+
+    Raises:
+        ValueError: If layout_id is not recognized
+    """
+    presets = {
+        LayoutType.SPLIT_SCREEN: {
+            "id": LayoutType.SPLIT_SCREEN,
+            "name": "Split Screen",
+            "description": "Screen content on top, face close-up on bottom - optimal for tutorials and screen recordings",
+            "screen_ratio": 0.50,
+            "face_ratio": 0.50,
+            "requires_face": True,
+            "requires_screen": True,
+        },
+        LayoutType.TALKING_HEAD: {
+            "id": LayoutType.TALKING_HEAD,
+            "name": "Talking Head",
+            "description": "Dynamic face-focused crop that follows the speaker - perfect for podcasts and vlogs",
+            "screen_ratio": 0.0,
+            "face_ratio": 1.0,
+            "requires_face": True,
+            "requires_screen": False,
+        },
+    }
+
+    if layout_id not in presets:
+        valid_layouts = list(presets.keys())
+        raise ValueError(f"Unknown layout type: {layout_id}. Valid layouts: {valid_layouts}")
+
+    return presets[layout_id]
+
+
+def get_available_layouts() -> list[dict]:
+    """
+    Get list of available layout presets with metadata.
+
+    Returns:
+        List of layout info dicts with id, name, description, and preview info
+    """
+    return [
+        {
+            "id": LayoutType.SPLIT_SCREEN,
+            "name": "Split Screen",
+            "description": "Screen content on top, face close-up on bottom - optimal for tutorials and screen recordings",
+            "icon": "layout-grid",  # lucide icon name for frontend
+            "preview_layout": {"top": "screen", "bottom": "face"},
+        },
+        {
+            "id": LayoutType.TALKING_HEAD,
+            "name": "Talking Head",
+            "description": "Dynamic face-focused crop that follows the speaker - perfect for podcasts and vlogs",
+            "icon": "user",
+            "preview_layout": {"full": "face"},
+        },
+    ]
+
+
+# ============================================================
+# CAPTION PRESETS
+# ============================================================
+
+class CaptionPreset:
+    """
+    Available caption preset identifiers.
+
+    Users can select from these presets instead of manually configuring styles.
+    """
+    VIRAL_GOLD = "viral_gold"
+    CLEAN_WHITE = "clean_white"
+    NEON_POP = "neon_pop"
+    BOLD_BOXED = "bold_boxed"
+    GRADIENT_GLOW = "gradient_glow"
+
+
+def get_caption_preset(preset_id: str) -> CaptionStyle:
+    """
+    Get a CaptionStyle configuration for a given preset ID.
+
+    Args:
+        preset_id: One of the CaptionPreset constants
+
+    Returns:
+        Configured CaptionStyle for the preset
+
+    Raises:
+        ValueError: If preset_id is not recognized
+    """
+    presets = {
+        CaptionPreset.VIRAL_GOLD: _create_viral_gold_style(),
+        CaptionPreset.CLEAN_WHITE: _create_clean_white_style(),
+        CaptionPreset.NEON_POP: _create_neon_pop_style(),
+        CaptionPreset.BOLD_BOXED: _create_bold_boxed_style(),
+        CaptionPreset.GRADIENT_GLOW: _create_gradient_glow_style(),
+    }
+
+    if preset_id not in presets:
+        valid_presets = list(presets.keys())
+        raise ValueError(f"Unknown caption preset: {preset_id}. Valid presets: {valid_presets}")
+
+    return presets[preset_id]
+
+
+def get_available_presets() -> list[dict]:
+    """
+    Get list of available caption presets with metadata.
+
+    Returns:
+        List of preset info dicts with id, name, description
+    """
+    return [
+        {
+            "id": CaptionPreset.VIRAL_GOLD,
+            "name": "Viral Gold",
+            "description": "Bold white text with gold word highlighting - classic viral TikTok style",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#FFD700"},
+        },
+        {
+            "id": CaptionPreset.CLEAN_WHITE,
+            "name": "Clean White",
+            "description": "Minimal white text with subtle styling - professional and clean",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#E0E0E0"},
+        },
+        {
+            "id": CaptionPreset.NEON_POP,
+            "name": "Neon Pop",
+            "description": "Vibrant cyan and magenta neon colors - gaming and entertainment",
+            "preview_colors": {"primary": "#00FFFF", "highlight": "#FF00FF"},
+        },
+        {
+            "id": CaptionPreset.BOLD_BOXED,
+            "name": "Bold Boxed",
+            "description": "High contrast white with yellow highlights - news and podcasts",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#FFFF00"},
+        },
+        {
+            "id": CaptionPreset.GRADIENT_GLOW,
+            "name": "Gradient Glow",
+            "description": "Modern white with coral pink accents - trendy lifestyle content",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#FF6B6B"},
+        },
+    ]
+
+
+def _create_viral_gold_style() -> CaptionStyle:
+    """Viral Gold: Bold white + gold highlighting - classic viral TikTok style."""
+    style = CaptionStyle()
+    style.font_name = "Arial Black"
+    style.font_size = 72
+    style.primary_color = "#FFFFFF"
+    style.highlight_color = "#FFD700"  # Gold
+    style.outline_color = "#000000"
+    style.outline_width = 4
+    style.shadow_color = "#000000"
+    style.position = "center"
+    style.max_words_per_line = 4
+    style.word_by_word_highlight = True
+    style.alignment = "center"
+    style.bold = True
+    style.uppercase = True
+    return style
+
+
+def _create_clean_white_style() -> CaptionStyle:
+    """Clean White: Minimal professional look with subtle highlighting."""
+    style = CaptionStyle()
+    style.font_name = "Arial"
+    style.font_size = 64
+    style.primary_color = "#FFFFFF"
+    style.highlight_color = "#E0E0E0"  # Light gray (subtle)
+    style.outline_color = "#333333"  # Dark gray
+    style.outline_width = 2
+    style.shadow_color = "#222222"
+    style.position = "center"
+    style.max_words_per_line = 5
+    style.word_by_word_highlight = True
+    style.alignment = "center"
+    style.bold = True
+    style.uppercase = False  # Mixed case for professional look
+    return style
+
+
+def _create_neon_pop_style() -> CaptionStyle:
+    """Neon Pop: Vibrant cyan + magenta for gaming/entertainment."""
+    style = CaptionStyle()
+    style.font_name = "Arial Black"
+    style.font_size = 76
+    style.primary_color = "#00FFFF"  # Cyan
+    style.highlight_color = "#FF00FF"  # Magenta
+    style.outline_color = "#000000"
+    style.outline_width = 5
+    style.shadow_color = "#000066"  # Dark blue shadow for glow effect
+    style.position = "center"
+    style.max_words_per_line = 4
+    style.word_by_word_highlight = True
+    style.alignment = "center"
+    style.bold = True
+    style.uppercase = True
+    return style
+
+
+def _create_bold_boxed_style() -> CaptionStyle:
+    """Bold Boxed: High contrast with yellow highlights for news/podcasts."""
+    style = CaptionStyle()
+    style.font_name = "Helvetica"
+    style.font_size = 68
+    style.primary_color = "#FFFFFF"
+    style.highlight_color = "#FFFF00"  # Yellow
+    style.outline_color = "#000000"
+    style.outline_width = 6  # Thicker outline for boxed look
+    style.shadow_color = "#000000"
+    style.position = "bottom"  # News style typically at bottom
+    style.max_words_per_line = 6
+    style.word_by_word_highlight = True
+    style.alignment = "center"
+    style.bold = True
+    style.uppercase = True
+    return style
+
+
+def _create_gradient_glow_style() -> CaptionStyle:
+    """Gradient Glow: Modern trendy style with coral pink accents."""
+    style = CaptionStyle()
+    style.font_name = "Arial Black"
+    style.font_size = 70
+    style.primary_color = "#FFFFFF"
+    style.highlight_color = "#FF6B6B"  # Coral pink
+    style.outline_color = "#4A0080"  # Dark purple
+    style.outline_width = 3
+    style.shadow_color = "#2D004D"  # Deep purple shadow
+    style.position = "center"
+    style.max_words_per_line = 4
+    style.word_by_word_highlight = True
+    style.alignment = "center"
+    style.bold = True
+    style.uppercase = True
+    return style
+
+
 class Settings(BaseSettings):
     """
     Application settings.
@@ -172,18 +433,18 @@ class Settings(BaseSettings):
     def ffmpeg_crf(self) -> int:
         return 20
 
-    # OpusClip-Style Layout (screen top, face bottom, captions overlaid)
+    # Split Layout (screen top, face bottom, captions overlaid)
     @property
-    def opusclip_screen_ratio(self) -> float:
+    def split_screen_ratio(self) -> float:
         return 0.50  # Screen content: 50% (top)
 
     @property
-    def opusclip_face_ratio(self) -> float:
+    def split_face_ratio(self) -> float:
         return 0.50  # Speaker face: 50% (bottom)
 
     @property
-    def use_opusclip_layout(self) -> bool:
-        return True  # Enable OpusClip-style layout for screen_share
+    def use_split_layout(self) -> bool:
+        return True  # Enable split layout for screen_share (screen top, face bottom)
 
     # Legacy Stack Layout (kept for fallback)
     @property

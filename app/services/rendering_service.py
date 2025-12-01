@@ -136,9 +136,9 @@ class RenderingService:
             and request.primary_timeline
             and request.secondary_timeline
         ):
-            # Use OpusClip-style layout if enabled (screen top, captions middle, face bottom)
-            if self.settings.use_opusclip_layout:
-                await self._render_opusclip_mode(request, caption_path, duration_ms)
+            # Use split layout if enabled (screen top, face bottom, captions overlaid)
+            if self.settings.use_split_layout:
+                await self._render_split_mode(request, caption_path, duration_ms)
             else:
                 # Fallback to standard stack mode
                 await self._render_stack_mode(request, caption_path, duration_ms)
@@ -194,21 +194,19 @@ class RenderingService:
             logger.warning(f"Failed to probe video dimensions: {e}")
             return 0, 0
 
-    async def _render_opusclip_mode(
+    async def _render_split_mode(
         self,
         request: RenderRequest,
         caption_path: Optional[str],
         duration_ms: int,
     ) -> None:
         """
-        Render OpusClip-style layout with 2 regions and overlaid captions.
+        Render split layout with 2 regions and overlaid captions.
 
         Layout (top to bottom):
         - Screen content: 50% (top)
         - Speaker face: 50% (bottom) - tight face-centered crop
         - Captions: Overlaid on top of combined video (no black band)
-
-        Based on epiriumaiclips architecture for professional results.
         """
         face_timeline = request.primary_timeline  # Face tracking
         screen_timeline = request.secondary_timeline  # Screen content
@@ -228,13 +226,13 @@ class RenderingService:
                 screen_timeline.source_width = actual_width
                 screen_timeline.source_height = actual_height
 
-        # Calculate region heights based on OpusClip ratios (2 regions, no caption band)
+        # Calculate region heights for split layout (2 regions, no caption band)
         total_height = self.settings.target_output_height
-        screen_height = int(total_height * self.settings.opusclip_screen_ratio)
+        screen_height = int(total_height * self.settings.split_screen_ratio)
         face_height = total_height - screen_height  # Remaining space for face
 
         logger.info(
-            f"OpusClip mode render: source={face_timeline.source_width}x{face_timeline.source_height}, "
+            f"Split mode render: source={face_timeline.source_width}x{face_timeline.source_height}, "
             f"screen={screen_height}px, face={face_height}px (captions overlaid)"
         )
 
@@ -247,7 +245,7 @@ class RenderingService:
             # Pass 1: Render screen content (TOP 50%)
             # Square center crop, scaled to fill full width
             logger.debug("Pass 1: Rendering screen content (top)...")
-            await self._render_opusclip_screen(
+            await self._render_split_screen(
                 input_path=request.video_path,
                 output_path=temp_screen_path,
                 timeline=screen_timeline,
@@ -259,7 +257,7 @@ class RenderingService:
 
             # Pass 2: Render tight face crop (BOTTOM 50%)
             logger.debug("Pass 2: Rendering face crop (bottom)...")
-            await self._render_opusclip_face(
+            await self._render_split_face(
                 input_path=request.video_path,
                 output_path=temp_face_path,
                 timeline=face_timeline,
@@ -271,7 +269,7 @@ class RenderingService:
 
             # Pass 3: Merge 2 regions with vstack and overlay captions
             logger.debug("Pass 3: Merging 2 regions with captions overlaid...")
-            await self._vstack_opusclip_with_overlay(
+            await self._vstack_split_with_overlay(
                 screen_path=temp_screen_path,
                 face_path=temp_face_path,
                 output_path=request.output_path,
@@ -290,7 +288,7 @@ class RenderingService:
                     except Exception:
                         pass
 
-    async def _render_opusclip_screen(
+    async def _render_split_screen(
         self,
         input_path: str,
         output_path: str,
@@ -301,16 +299,16 @@ class RenderingService:
         duration_ms: int,
     ) -> None:
         """
-        Render screen content for OpusClip layout.
+        Render screen content for split layout (top region).
 
-        Following epiriumaiclips approach: Take a SQUARE crop from the CENTER
-        of the original frame, then resize to fill the target width.
-        This captures the screen content (typically in the middle of the frame).
+        Takes a SQUARE crop from the CENTER of the original frame,
+        then resizes to fill the target width. This captures the screen
+        content (typically in the middle of the frame).
         """
         source_w = timeline.source_width
         source_h = timeline.source_height
 
-        # Take a square crop from the CENTER of the frame (epiriumaiclips style)
+        # Take a square crop from the CENTER of the frame
         # Use the smaller dimension to ensure the crop fits
         square_size = min(source_w, source_h)
 
@@ -322,7 +320,7 @@ class RenderingService:
         crop_y = max(0, (source_h - square_size) // 2)
 
         logger.info(
-            f"OpusClip SCREEN crop: source={source_w}x{source_h}, "
+            f"Split SCREEN crop: source={source_w}x{source_h}, "
             f"square {square_size}x{square_size} from center at ({crop_x}, {crop_y}) "
             f"-> scale to {target_width}x{target_height}"
         )
@@ -344,7 +342,7 @@ class RenderingService:
             include_audio=False,
         )
 
-    async def _render_opusclip_face(
+    async def _render_split_face(
         self,
         input_path: str,
         output_path: str,
@@ -355,11 +353,11 @@ class RenderingService:
         duration_ms: int,
     ) -> None:
         """
-        Render tight face crop for OpusClip layout (speaker region).
+        Render tight face crop for split layout (bottom region).
 
-        Following epiriumaiclips approach: Create a TIGHT SQUARE crop around
-        the detected face position, then scale UP dramatically to fill the
-        bottom region. This creates a close-up portrait view of the speaker.
+        Creates a TIGHT SQUARE crop around the detected face position,
+        then scales UP dramatically to fill the bottom region.
+        This creates a close-up portrait view of the speaker.
         """
         keyframes = timeline.keyframes
 
@@ -396,7 +394,7 @@ class RenderingService:
         scaled_height = int(crop_size * scale_factor)
 
         logger.info(
-            f"OpusClip FACE crop: source={source_w}x{source_h}, "
+            f"Split FACE crop: source={source_w}x{source_h}, "
             f"crop={crop_size}x{crop_size} at ({crop_x}, {crop_y}) "
             f"-> scale {scale_factor:.2f}x to {target_width}x{scaled_height} "
             f"-> final {target_width}x{target_height}"
@@ -428,7 +426,7 @@ class RenderingService:
         caption_path: Optional[str],
     ) -> None:
         """
-        Create the caption band for OpusClip layout.
+        Create the caption band for split layout.
         
         This is a black background with captions positioned in the center.
         """
@@ -520,7 +518,7 @@ class RenderingService:
             import shutil
             shutil.copy(source_ass, output_ass)
 
-    async def _vstack_opusclip_with_overlay(
+    async def _vstack_split_with_overlay(
         self,
         screen_path: str,
         face_path: str,

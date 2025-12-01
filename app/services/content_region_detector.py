@@ -352,7 +352,7 @@ class ContentRegionDetector:
             frame_analysis.frame_height // 2,
         )
 
-    def analyze_for_opusclip_layout(
+    def analyze_for_split_layout(
         self,
         frame: Optional[np.ndarray],
         face_detections: list[dict],
@@ -360,27 +360,27 @@ class ContentRegionDetector:
         frame_height: int = 1080,
     ) -> dict:
         """
-        Analyze frame specifically for OpusClip-style 3-region layout.
-        
-        OpusClip Layout:
-        - Screen content: 45% (TOP)
-        - Caption band: 12% (MIDDLE)
-        - Speaker face: 43% (BOTTOM)
-        
+        Analyze frame specifically for split layout (screen top, face bottom).
+
+        Split Layout:
+        - Screen content: 50% (TOP)
+        - Speaker face: 50% (BOTTOM)
+        - Captions: Overlaid on combined video
+
         This method identifies:
-        1. Whether the frame is suitable for OpusClip layout
+        1. Whether the frame is suitable for split layout
         2. Primary speaker face position for tight face cropping
         3. Optimal screen content center avoiding webcam overlay
         4. Webcam overlay position if present
-        
+
         Args:
             frame: Video frame as numpy array (BGR), can be None
             face_detections: List of face detection dicts with 'bbox' and 'confidence'
             frame_width: Frame width (used when frame is None)
             frame_height: Frame height (used when frame is None)
-            
+
         Returns:
-            dict with analysis results for OpusClip rendering
+            dict with analysis results for split layout rendering
         """
         if frame is not None:
             height, width = frame.shape[:2]
@@ -391,7 +391,7 @@ class ContentRegionDetector:
         
         # Results dict
         result = {
-            "is_opusclip_suitable": False,
+            "is_split_suitable": False,
             "webcam_position": None,
             "primary_face_center": None,
             "primary_face_bbox": None,
@@ -399,10 +399,10 @@ class ContentRegionDetector:
             "face_size_ratio": 0.0,
             "layout_confidence": 0.0,
         }
-        
+
         if not face_detections:
             # No faces detected - might be pure screen share
-            result["is_opusclip_suitable"] = True
+            result["is_split_suitable"] = True
             result["layout_confidence"] = 0.5
             return result
         
@@ -452,32 +452,32 @@ class ContentRegionDetector:
             
             # Calculate optimal screen content center avoiding webcam
             if result["webcam_position"]:
-                result["is_opusclip_suitable"] = True
+                result["is_split_suitable"] = True
                 result["layout_confidence"] = 0.9
-                
+
                 # Shift screen center away from webcam
                 if "left" in result["webcam_position"]:
                     screen_x = int(width * 0.55)
                 else:
                     screen_x = int(width * 0.45)
-                
+
                 if "top" in result["webcam_position"]:
                     screen_y = int(height * 0.55)
                 else:
                     screen_y = int(height * 0.40)
-                
+
                 result["screen_content_center"] = (screen_x, screen_y)
             else:
                 # Face is centered/large - could still be screen share with speaker overlay
                 # Or could be talking head
                 if face_ratio > 0.15:
-                    # Large face - likely talking head, OpusClip not ideal
-                    result["is_opusclip_suitable"] = False
+                    # Large face - likely talking head, split layout not ideal
+                    result["is_split_suitable"] = False
                     result["layout_confidence"] = 0.3
                 else:
-                    # Medium face - could work for OpusClip
-                    result["is_opusclip_suitable"] = True
+                    # Medium face - could work for split layout
+                    result["is_split_suitable"] = True
                     result["layout_confidence"] = 0.6
-        
+
         return result
 

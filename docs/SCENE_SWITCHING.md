@@ -216,7 +216,7 @@ This document outlines a plan to implement **dynamic scene switching** - the abi
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 │  Each layout uses existing render methods:                                  │
-│  • SCREEN_SHARE  → _render_opusclip_mode()                                  │
+│  • SCREEN_SHARE  → _render_split_mode()                                     │
 │  • TALKING_HEAD  → _render_focus_mode()                                     │
 │  • FULL_SCREEN   → _render_static() with center crop                        │
 │                                                                             │
@@ -506,7 +506,7 @@ async def _render_dynamic_layout(self, request: RenderRequest) -> RenderResult:
 
             # Render with appropriate layout
             if segment.layout_type == LayoutType.SCREEN_SHARE:
-                await self._render_opusclip_mode(segment_request, None, segment.duration_ms)
+                await self._render_split_mode(segment_request, None, segment.duration_ms)
             elif segment.layout_type == LayoutType.TALKING_HEAD:
                 await self._render_focus_mode(segment_request, None, segment.duration_ms)
             elif segment.layout_type == LayoutType.FULL_SCREEN:

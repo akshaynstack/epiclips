@@ -16,6 +16,9 @@ from app.auth import verify_api_key
 # Duration range type for multi-select
 DurationRangeType = Literal["short", "medium", "long"]
 
+# Layout type for clip rendering
+LayoutTypeInput = Literal["split_screen", "talking_head"]
+
 # Duration range configuration
 DURATION_RANGE_CONFIG = {
     "short": {"min": 15, "max": 30, "label": "15-30 seconds"},
@@ -23,7 +26,16 @@ DURATION_RANGE_CONFIG = {
     "long": {"min": 60, "max": 120, "label": "1-2 minutes"},
 }
 
-from app.config import CaptionStyle, get_settings
+from app.config import (
+    CaptionStyle,
+    CaptionPreset,
+    get_caption_preset,
+    get_available_presets,
+    LayoutType,
+    get_layout_preset,
+    get_available_layouts,
+    get_settings,
+)
 from app.services.ai_clipping_pipeline import (
     AIClippingPipeline,
     ClippingJobProgress,
@@ -32,6 +44,7 @@ from app.services.ai_clipping_pipeline import (
     JobStatus,
 )
 from app.services.detection_pipeline import DetectionPipeline
+from app.services.video_downloader import VideoDownloaderService, VideoDownloadError
 
 logger = logging.getLogger(__name__)
 
@@ -59,14 +72,14 @@ class CaptionStyleInput(BaseModel):
 
 class ClipJobSubmitRequest(BaseModel):
     """Request to submit a new AI clipping job.
-    
+
     Supports multiple video sources:
     - YouTube URL: https://youtube.com/watch?v=...
     - S3 URL: s3://bucket/key or https://bucket.s3.region.amazonaws.com/key
     - S3 Key: path/to/video.mp4 (uses configured bucket)
     - Direct URL: https://example.com/video.mp4
     """
-    
+
     video_url: Optional[str] = Field(None, description="Video URL (YouTube, S3, or direct)")
     s3_key: Optional[str] = Field(None, description="S3 key (if using configured bucket)")
     max_clips: int = Field(5, ge=1, le=20, description="Maximum number of clips to generate")
@@ -78,9 +91,17 @@ class ClipJobSubmitRequest(BaseModel):
     )
     target_platform: str = Field("tiktok", description="Target platform (tiktok, youtube_shorts, instagram_reels)")
     include_captions: bool = Field(True, description="Whether to include viral-style captions")
-    caption_style: Optional[CaptionStyleInput] = Field(None, description="Custom caption styling")
+    caption_preset: Optional[str] = Field(
+        None,
+        description="Caption preset ID: 'viral_gold', 'clean_white', 'neon_pop', 'bold_boxed', 'gradient_glow'. Takes precedence over caption_style."
+    )
+    caption_style: Optional[CaptionStyleInput] = Field(None, description="Custom caption styling (used if caption_preset not provided)")
+    layout_type: Optional[LayoutTypeInput] = Field(
+        "split_screen",
+        description="Layout type: 'split_screen' (screen top, face bottom), 'talking_head' (face-focused)"
+    )
     callback_url: Optional[str] = Field(None, description="Webhook URL for progress updates")
-    
+
     # For API integration - job tracking
     external_job_id: Optional[str] = Field(None, description="External job ID from calling service")
     owner_user_id: Optional[str] = Field(None, description="User ID for tracking")
@@ -139,10 +160,29 @@ class ClipJobStatusResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
-    
+
     status: str
     services: dict[str, str]
     timestamp: str
+
+
+class VideoMetadataRequest(BaseModel):
+    """Request to get video metadata for cost estimation."""
+
+    video_url: Optional[str] = Field(None, description="Video URL (YouTube, S3, or direct)")
+    s3_key: Optional[str] = Field(None, description="S3 key (if using configured bucket)")
+
+
+class VideoMetadataResponse(BaseModel):
+    """Response with video metadata for cost estimation."""
+
+    title: str
+    duration_seconds: float
+    duration_minutes: float
+    width: int
+    height: int
+    source_type: str
+    estimated_credits: int = Field(description="Estimated credits at 10 credits/minute")
 
 
 # ============================================================================
@@ -192,6 +232,68 @@ def progress_callback(progress: ClippingJobProgress) -> None:
 # ============================================================================
 
 
+class CaptionPresetResponse(BaseModel):
+    """Response model for a caption preset."""
+
+    id: str
+    name: str
+    description: str
+    preview_colors: dict[str, str]
+
+
+@router.get("/caption-presets", response_model=list[CaptionPresetResponse])
+async def list_caption_presets() -> list[CaptionPresetResponse]:
+    """
+    List all available caption presets.
+
+    Returns preset IDs, names, descriptions, and preview colors for UI rendering.
+    """
+    presets = get_available_presets()
+    return [
+        CaptionPresetResponse(
+            id=p["id"],
+            name=p["name"],
+            description=p["description"],
+            preview_colors=p["preview_colors"],
+        )
+        for p in presets
+    ]
+
+
+class LayoutPresetResponse(BaseModel):
+    """Response model for a layout preset."""
+
+    id: str
+    name: str
+    description: str
+    icon: str
+    preview_layout: dict[str, str]
+
+
+@router.get("/layout-presets", response_model=list[LayoutPresetResponse])
+async def list_layout_presets() -> list[LayoutPresetResponse]:
+    """
+    List all available layout presets.
+
+    Returns layout IDs, names, descriptions, icons, and preview info for UI rendering.
+
+    Available layouts:
+    - split_screen: Screen content on top, face close-up on bottom (50/50 split)
+    - talking_head: Dynamic face-focused crop that follows the speaker
+    """
+    layouts = get_available_layouts()
+    return [
+        LayoutPresetResponse(
+            id=layout["id"],
+            name=layout["name"],
+            description=layout["description"],
+            icon=layout["icon"],
+            preview_layout=layout["preview_layout"],
+        )
+        for layout in layouts
+    ]
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health_check(
     detection_pipeline: DetectionPipeline = Depends(get_detection_pipeline),
@@ -213,6 +315,83 @@ async def health_check(
         services=services,
         timestamp=datetime.utcnow().isoformat(),
     )
+
+
+@router.post("/metadata", response_model=VideoMetadataResponse)
+async def get_video_metadata(
+    request: VideoMetadataRequest,
+    _: None = Depends(verify_api_key),
+) -> VideoMetadataResponse:
+    """
+    Get video metadata for cost estimation without starting a job.
+
+    This lightweight endpoint extracts video duration and metadata to allow
+    calculating the credit cost before submitting a job.
+
+    Pricing: 10 credits per minute of source video (minimum 10 credits).
+
+    Args:
+        request: Video URL or S3 key
+
+    Returns:
+        Video metadata including duration and estimated credit cost
+    """
+    # Validate that either video_url or s3_key is provided
+    if not request.video_url and not request.s3_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either video_url or s3_key must be provided",
+        )
+
+    video_source = request.video_url or request.s3_key
+    downloader = VideoDownloaderService()
+
+    try:
+        source_type = downloader.detect_source_type(video_source)
+
+        if source_type == "youtube":
+            # For YouTube, use yt-dlp to get metadata without downloading
+            metadata = await downloader._get_video_info(video_source)
+        elif source_type == "s3":
+            # For S3, we'd need to download to get metadata - return error for now
+            # In production, could use HEAD request + ffprobe on range request
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="S3 video metadata requires download. Please provide a YouTube URL for cost estimation, or submit the job directly.",
+            )
+        else:
+            # For direct URLs, similar limitation
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Direct URL metadata requires download. Please provide a YouTube URL for cost estimation, or submit the job directly.",
+            )
+
+        # Calculate estimated credits: 10 credits per minute, minimum 10
+        duration_minutes = metadata.duration_seconds / 60
+        estimated_credits = max(10, int(duration_minutes * 10 + 0.5))  # Round to nearest
+
+        return VideoMetadataResponse(
+            title=metadata.title,
+            duration_seconds=metadata.duration_seconds,
+            duration_minutes=round(duration_minutes, 2),
+            width=metadata.width,
+            height=metadata.height,
+            source_type=source_type,
+            estimated_credits=estimated_credits,
+        )
+
+    except VideoDownloadError as e:
+        logger.error(f"Failed to get video metadata: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to get video metadata: {str(e)}",
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error getting video metadata: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve video metadata",
+        )
 
 
 @router.post("/jobs", response_model=ClipJobSubmitResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -258,20 +437,30 @@ async def submit_clipping_job(
             detail=f"Invalid platform. Must be one of: {valid_platforms}",
         )
     
-    # Convert caption style if provided
+    # Resolve caption style: preset takes precedence over custom style
     caption_style: Optional[CaptionStyle] = None
-    if request.caption_style:
-        caption_style = CaptionStyle(
-            font_family=request.caption_style.font_family,
-            font_size=request.caption_style.font_size,
-            primary_color=request.caption_style.primary_color,
-            highlight_color=request.caption_style.highlight_color,
-            outline_color=request.caption_style.outline_color,
-            outline_width=request.caption_style.outline_width,
-            position=request.caption_style.position,
-            alignment=request.caption_style.alignment,
-            words_per_group=request.caption_style.words_per_group,
-        )
+    if request.caption_preset:
+        # Use preset if specified
+        try:
+            caption_style = get_caption_preset(request.caption_preset)
+            logger.info(f"Using caption preset: {request.caption_preset}")
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+    elif request.caption_style:
+        # Fall back to custom style
+        caption_style = CaptionStyle()
+        caption_style.font_name = request.caption_style.font_family
+        caption_style.font_size = request.caption_style.font_size
+        caption_style.primary_color = f"#{request.caption_style.primary_color}" if not request.caption_style.primary_color.startswith("#") else request.caption_style.primary_color
+        caption_style.highlight_color = f"#{request.caption_style.highlight_color}" if not request.caption_style.highlight_color.startswith("#") else request.caption_style.highlight_color
+        caption_style.outline_color = f"#{request.caption_style.outline_color}" if not request.caption_style.outline_color.startswith("#") else request.caption_style.outline_color
+        caption_style.outline_width = request.caption_style.outline_width
+        caption_style.position = request.caption_style.position
+        caption_style.alignment = request.caption_style.alignment
+        caption_style.max_words_per_line = request.caption_style.words_per_group
     
     # Calculate min/max duration from duration_ranges if provided
     min_duration = request.min_clip_duration_seconds
@@ -311,6 +500,7 @@ async def submit_clipping_job(
         target_platform=request.target_platform,
         include_captions=request.include_captions,
         caption_style=caption_style,
+        layout_type=request.layout_type or "split_screen",
         callback_url=request.callback_url,
     )
     

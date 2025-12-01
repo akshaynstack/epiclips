@@ -90,6 +90,7 @@ class ClippingJobRequest:
     target_platform: str = "tiktok"  # tiktok, youtube_shorts, instagram_reels
     include_captions: bool = True
     caption_style: Optional[CaptionStyle] = None
+    layout_type: str = "split_screen"  # split_screen, full_screen, talking_head
     callback_url: Optional[str] = None  # URL to receive webhook notifications
 
     def __post_init__(self):
@@ -223,6 +224,7 @@ class AIClippingPipeline:
                 max_duration_seconds=request.max_clip_duration_seconds,
                 duration_ranges=request.duration_ranges,
                 target_platform=request.target_platform,
+                layout_type=request.layout_type,
             )
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             
@@ -477,7 +479,7 @@ class AIClippingPipeline:
         """
         Build a crop timeline from detection results for face tracking.
 
-        SIMPLIFIED to match epiriumaiclips architecture:
+        Build crop timeline for face tracking:
         - For talking_head: Full 9:16 crop window following face
         - For screen_share: Tight crop around face for bottom region
         - Simple fallback to center-bottom when no faces detected
@@ -485,10 +487,10 @@ class AIClippingPipeline:
         # Calculate crop window based on layout type
         if segment.layout_type == "screen_share":
             # For screen_share: tight crop around face for close-up effect
-            face_output_height = int(self.settings.target_output_height * self.settings.opusclip_face_ratio)
+            face_output_height = int(self.settings.target_output_height * self.settings.split_face_ratio)
             face_crop_aspect = self.settings.target_output_width / face_output_height
 
-            # Calculate face size from detections (like epiriumaiclips)
+            # Calculate face size from detections
             face_areas = []
             if detection_frames:
                 for frame in detection_frames:
@@ -500,11 +502,11 @@ class AIClippingPipeline:
                             face_areas.append(face_w * face_h)
 
             if face_areas:
-                # Use average face area (like epiriumaiclips)
+                # Use average face area
                 avg_face_area = sum(face_areas) / len(face_areas)
                 avg_face_size = int(avg_face_area ** 0.5)
 
-                # Create TIGHT crop: 2x face size (matching epiriumaiclips)
+                # Create TIGHT crop: 2x face size
                 # This smaller crop will scale UP dramatically to fill the bottom region
                 face_crop_size = avg_face_size * 2
 
@@ -539,7 +541,7 @@ class AIClippingPipeline:
         
         frame_area = source_width * source_height
         
-        # Collect raw face positions using WEIGHTED AVERAGE (epiriumaiclips style)
+        # Collect raw face positions using WEIGHTED AVERAGE
         raw_positions: list[tuple[int, int, int]] = []  # (timestamp_ms, center_x, center_y)
         
         for frame in detection_frames:
@@ -580,7 +582,7 @@ class AIClippingPipeline:
                     final_x = int(weighted_x / total_weight)
                     final_y = int(weighted_y / total_weight)
                     
-                    # Apply UPPER BIAS for better face framing (epiriumaiclips style)
+                    # Apply UPPER BIAS for better face framing
                     # Shift the target Y position up by 10% of window height
                     # This places the face in the upper portion of the crop frame
                     upper_bias = int(window_height * 0.1)
@@ -594,7 +596,7 @@ class AIClippingPipeline:
                         _, last_x, last_y = raw_positions[-1]
                         raw_positions.append((timestamp_ms, last_x, last_y))
                     else:
-                        # Fallback: center-bottom (like epiriumaiclips)
+                        # Fallback: center-bottom
                         center_x = source_width // 2
                         if segment.layout_type == "screen_share":
                             center_y = int(source_height * 0.75)  # Center-bottom area
@@ -608,7 +610,7 @@ class AIClippingPipeline:
                     _, last_x, last_y = raw_positions[-1]
                     raw_positions.append((timestamp_ms, last_x, last_y))
                 else:
-                    # Fallback: center-bottom (matching epiriumaiclips)
+                    # Fallback: center-bottom
                     center_x = source_width // 2
                     if segment.layout_type == "screen_share":
                         center_y = int(source_height * 0.75)  # Center-bottom
@@ -652,7 +654,7 @@ class AIClippingPipeline:
         std_threshold: float = 2.0,
     ) -> list[tuple[int, int, int]]:
         """
-        Filter outlier positions using statistical analysis (epiriumaiclips style).
+        Filter outlier positions using statistical analysis.
         
         Removes positions more than std_threshold standard deviations from median.
         This prevents sudden crop jumps from false positive detections.
@@ -736,20 +738,15 @@ class AIClippingPipeline:
         """
         Build a crop timeline for the screen portion of a screen_share layout.
 
-        SIMPLIFIED to match epiriumaiclips:
-        - Always take a SQUARE crop from the CENTER of the frame
-        - No webcam position detection needed
-        - The screen content is typically centered in stream layouts
+        Takes a SQUARE crop from the CENTER of the frame.
+        The screen content is typically centered in stream layouts.
         """
-        # epiriumaiclips approach: square crop from center
-        # square_size = min(original_width, original_height)
-        # x_start = (original_width - square_size) // 2
-        # y_start = (original_height - square_size) // 2
+        # Square crop from center of frame
         square_size = min(source_width, source_height)
         center_x = source_width // 2
         center_y = source_height // 2
 
-        logger.info(f"Screen crop (epiriumaiclips style): square {square_size}x{square_size} from center")
+        logger.info(f"Screen crop: square {square_size}x{square_size} from center")
 
         return CropTimeline(
             window_width=square_size,

@@ -7,7 +7,7 @@ Detection Priority:
 3. YOLOv8 person -> face estimate (fallback)
 4. Haar Cascade (final fallback)
 
-Based on epiriumaiclips architecture for superior face tracking.
+Multi-tier architecture for superior face tracking.
 """
 
 import logging
