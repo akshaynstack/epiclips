@@ -21,7 +21,7 @@ class DetectionRequest(BaseModel):
         description="Interval between frame extractions in seconds",
     )
     detect_faces: bool = Field(
-        default=True, description="Whether to run YOLO face detection"
+        default=True, description="Whether to run MediaPipe face detection"
     )
     detect_poses: bool = Field(
         default=True, description="Whether to run MediaPipe pose estimation"

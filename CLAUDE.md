@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ViewCreator Genesis is the media processing engine for ViewCreator, a production-ready FastAPI microservice that transforms long-form videos into viral short-form clips using AI-powered analysis (Gemini), intelligent cropping (MediaPipe/YOLO), and automated caption generation (Whisper/FFmpeg).
+ViewCreator Genesis is the media processing engine for ViewCreator, a production-ready FastAPI microservice that transforms long-form videos into viral short-form clips using AI-powered analysis (Gemini), intelligent cropping (MediaPipe), and automated caption generation (Whisper/FFmpeg).
 
 ## IMPORTANT: Streaming Context
 
@@ -58,7 +58,7 @@ pytest -v -s                # Verbose output with stdout
     - `transcription_service.py`, `intelligence_planner.py`: AI integration
     - `detection_pipeline.py`, `rendering_service.py`: Media processing
   - `schemas/`: Pydantic request/response models
-- `models/`: Local ML models (e.g., YOLO weights)
+- `models/`: Local ML models (Haar cascades bundled with OpenCV)
 - `tests/`: Pytest suites
 
 ### Key Services & Pipeline Stages
@@ -66,13 +66,19 @@ pytest -v -s                # Verbose output with stdout
 2.  **Transcription**: Uses Groq Whisper API for fast, word-level timestamps.
 3.  **IntelligencePlanner**: Uses Gemini (via OpenRouter) to identify viral clips.
 4.  **DetectionPipeline**:
-    - Face Detection: Multi-tier (MediaPipe > YOLO > Haar).
+    - Face Detection: Multi-tier (MediaPipe > Haar Cascade).
     - Pose Estimation: MediaPipe.
     - Object Tracking: DeepSORT.
 5.  **ContentRegionDetector**: Identifies screen shares vs. talking heads.
 6.  **RenderingService**: FFmpeg-based cropping and composition (`focus_mode`, `split_mode`).
 7.  **CaptionGenerator**: Creates `.ass` subtitles with word-level highlighting.
 8.  **S3UploadService**: Manages artifact storage.
+
+### Parallel Processing
+The pipeline uses `asyncio.gather()` for parallel execution:
+- **Parallel Clip Detection**: All clips processed concurrently in thread pool
+- **Parallel Rendering**: Up to `MAX_RENDER_WORKERS` (default 3) FFmpeg processes
+- **Parallel S3 Uploads**: All clips uploaded concurrently
 
 ### Dependency Graph
 `AIClippingPipeline` -> `VideoDownloader`, `TranscriptionService`, `IntelligencePlanner`
@@ -86,6 +92,8 @@ Required variables (must be set in `.env` or environment):
 - `GROQ_API_KEY`: For transcription.
 - `OPENROUTER_API_KEY`: For AI planning.
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET`: For storage.
+- `MAX_WORKERS`: Thread pool size for CPU-bound operations (default: 4).
+- `MAX_RENDER_WORKERS`: Max concurrent FFmpeg renders (default: 3).
 - `DEBUG`, `LOG_LEVEL`: Application tuning.
 
 ### System Dependencies
@@ -94,7 +102,7 @@ Required variables (must be set in `.env` or environment):
 - **Python 3.10+**: Recommended runtime.
 
 ### Common Gotchas
-- **ML Model Loading**: Models (`yolov8n.pt`) are loaded on startup. Ensure `models/` directory exists or internet access is available for initial download.
-- **Torch/CUDA**: The `Dockerfile` installs CPU-only PyTorch to keep image size down. Local dev might use CUDA if available, but ensure compatibility.
+- **Haar Cascades**: Bundled with OpenCV, no external model download needed.
 - **Async Processing**: The pipeline is heavily async. Use `await` correctly when calling services.
+- **Thread Pool**: CPU-bound detection operations run in thread pool to avoid blocking event loop.
 - **S3 & CDN**: Output URLs are transformed to CDN URLs in the API, but Genesis returns S3 URLs or pre-signed URLs depending on config.

@@ -15,8 +15,9 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       - S3_BUCKET=${S3_BUCKET:-viewcreator-media}
       
-      # Model Configuration
-      - YOLO_MODEL_PATH=/app/models/yolov8n.pt
+      # Parallel Processing Settings
+      - MAX_WORKERS=${MAX_WORKERS:-4}
+      - MAX_RENDER_WORKERS=${MAX_RENDER_WORKERS:-3}
       
       # Processing Settings
       - FRAME_INTERVAL_SECONDS=2.0

@@ -342,18 +342,13 @@ class Settings(BaseSettings):
     # yt-dlp Configuration
     ytdlp_proxy: Optional[str] = None  # Proxy URL (e.g., http://user:pass@host:port)
 
+    # Performance tuning (configurable for ECS scaling)
+    max_workers: int = 4  # Max concurrent jobs (set to vCPU count for optimal performance)
+    max_render_workers: int = 3  # Max concurrent FFmpeg render processes
+
     # ============================================================
     # HARDCODED SETTINGS (not configurable via env vars)
     # ============================================================
-
-    # Model paths
-    @property
-    def yolo_model_path(self) -> str:
-        return "/app/models/yolov8n.pt"
-
-    @property
-    def yolo_model_name(self) -> str:
-        return "yolov8n.pt"
 
     # Processing settings
     @property
@@ -362,7 +357,11 @@ class Settings(BaseSettings):
 
     @property
     def max_concurrent_jobs(self) -> int:
-        return 2
+        return self.max_workers  # Use configurable env var
+
+    @property
+    def max_concurrent_renders(self) -> int:
+        return self.max_render_workers  # Use configurable env var
 
     @property
     def temp_directory(self) -> str:

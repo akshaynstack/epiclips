@@ -58,11 +58,12 @@ def mock_settings():
     return {
         "aws_region": "us-east-1",
         "s3_bucket": "test-bucket",
-        "yolo_model_path": "/app/models/yolov8n.pt",
         "frame_interval_seconds": 2.0,
         "face_confidence_threshold": 0.5,
         "pose_confidence_threshold": 0.5,
         "temp_directory": "/tmp/test-worker",
+        "max_workers": 4,
+        "max_render_workers": 3,
     }
 
 

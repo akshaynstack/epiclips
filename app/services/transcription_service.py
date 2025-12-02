@@ -134,16 +134,15 @@ class TranscriptionService:
             audio_path,
         ]
         
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        # Use run_in_executor for Windows compatibility
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True)
         )
         
-        _, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            error_msg = stderr.decode() if stderr else "Unknown error"
+        if result.returncode != 0:
+            error_msg = result.stderr.decode() if result.stderr else "Unknown error"
             raise TranscriptionError(f"Failed to extract audio from video: {error_msg}")
         
         if not os.path.exists(audio_path):
@@ -476,14 +475,14 @@ class TranscriptionService:
                 chunk_path,
             ]
             
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
+            # Use run_in_executor for Windows compatibility
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(cmd, capture_output=True)
             )
-            await process.wait()
             
-            if process.returncode != 0:
+            if result.returncode != 0:
                 raise TranscriptionError(f"Failed to extract audio chunk {i}")
             
             chunks.append({
@@ -505,16 +504,15 @@ class TranscriptionService:
             audio_path,
         ]
         
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # Use run_in_executor for Windows compatibility
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True)
         )
         
-        stdout, _ = await process.communicate()
-        
         try:
-            return float(stdout.decode().strip())
+            return float(result.stdout.decode().strip())
         except ValueError:
             raise TranscriptionError(f"Failed to get audio duration for: {audio_path}")
 

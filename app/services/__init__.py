@@ -2,7 +2,7 @@
 Services for the clipping worker.
 
 Includes:
-- Detection services (YOLO, MediaPipe, DeepSORT)
+- Detection services (MediaPipe, Haar Cascade, DeepSORT)
 - AI clipping services (transcription, intelligence, rendering)
 """
 

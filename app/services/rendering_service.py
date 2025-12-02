@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -182,13 +183,13 @@ class RenderingService:
             video_path,
         ]
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            # Use run_in_executor for Windows compatibility
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(cmd, capture_output=True)
             )
-            stdout, _ = await process.communicate()
-            dims = stdout.decode().strip().split("x")
+            dims = result.stdout.decode().strip().split("x")
             return int(dims[0]), int(dims[1])
         except Exception as e:
             logger.warning(f"Failed to probe video dimensions: {e}")
@@ -886,8 +887,9 @@ class RenderingService:
         ]
         
         # Sample keyframes to avoid expression length limits
-        if len(rel_keyframes) > 5:
-            step = len(rel_keyframes) // 10 or 1
+        # Use more keyframes for smoother motion (up to 15)
+        if len(rel_keyframes) > 15:
+            step = max(1, len(rel_keyframes) // 15)
             sampled = rel_keyframes[::step]
             if sampled[-1] != rel_keyframes[-1]:
                 sampled.append(rel_keyframes[-1])
@@ -956,33 +958,53 @@ class RenderingService:
         """Run a command asynchronously."""
         logger.debug(f"Running: {' '.join(cmd[:10])}...")
         
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        # Use run_in_executor for Windows compatibility
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True)
         )
         
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            error_msg = stderr.decode()[-1000:] if stderr else "Unknown error"
+        if result.returncode != 0:
+            error_msg = result.stderr.decode()[-1000:] if result.stderr else "Unknown error"
             raise RenderingError(f"FFmpeg failed: {error_msg}")
 
     def _escape_filter_path(self, path: str) -> str:
-        """Escape path for FFmpeg filter usage."""
-        # FFmpeg filter escaping rules
-        return (
-            path
-            .replace("\\", "\\\\")
-            .replace(":", "\\:")
-            .replace("'", "\\'")
-            .replace(";", "\\;")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
-        )
+        """
+        Escape file path for FFmpeg filter usage.
+        
+        FFmpeg filters have specific path escaping requirements that differ 
+        across platforms. This method handles:
+        - Windows: Convert backslashes to forward slashes, escape drive letter colons
+        - All platforms: Escape special characters that have meaning in FFmpeg filters
+        
+        Args:
+            path: The file path to escape
+            
+        Returns:
+            Escaped path string safe for use in FFmpeg filter expressions
+        """
+        import sys
+        
+        # Normalize path separators to forward slashes (works on all platforms in FFmpeg)
+        escaped = path.replace("\\", "/")
+        
+        # On Windows, escape the drive letter colon (C: -> C\:)
+        # Must be done AFTER backslash replacement to avoid double-escaping
+        if sys.platform == "win32" and len(escaped) >= 2 and escaped[1] == ":":
+            escaped = escaped[0] + "\\:" + escaped[2:]
+        
+        # Escape special characters used in FFmpeg filter syntax
+        escaped = escaped.replace("'", "'\\''")  # Escape single quotes for shell
+        escaped = escaped.replace("[", "\\[")
+        escaped = escaped.replace("]", "\\]")
+        
+        # Wrap in single quotes for the filter expression
+        return f"'{escaped}'"
 
 
 class RenderingError(Exception):
     """Exception raised when rendering fails."""
     pass
+
 

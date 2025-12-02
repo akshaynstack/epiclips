@@ -37,11 +37,12 @@ ViewCreator Genesis is the media processing engine that handles the computationa
 | Video Download | yt-dlp | Up to 50 MB/s |
 | Transcription | Groq Whisper | 216x realtime |
 | AI Planning | Gemini 2.5 Flash | ~2s per analysis |
-| Face Detection | Multi-tier (MediaPipe + YOLO + Haar) | 60+ FPS with fallbacks |
+| Face Detection | Multi-tier (MediaPipe + Haar) | 60+ FPS with fallbacks |
 | Pose Estimation | MediaPipe | 30+ FPS |
 | Object Tracking | DeepSORT | Persistent IDs |
-| Video Rendering | FFmpeg H.264 | 2-region split + overlay |
+| Video Rendering | FFmpeg H.264 (parallel) | 3 concurrent renders |
 | Caption Style | ASS Subtitles (overlay) | Word-by-word highlight |
+| Parallel Processing | asyncio.gather | Detection, rendering, uploads |
 
 ---
 
@@ -74,7 +75,7 @@ Worker Internal Architecture:
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐       │
 │  │   Video     │    │   Audio     │    │ Intelligence│    │  Detection  │       │
 │  │  Downloader │───▶│ Transcriber │───▶│   Planner   │───▶│  Pipeline   │       │
-│  │  (yt-dlp)   │    │  (Whisper)  │    │  (Gemini)   │    │ (YOLO/MP)   │       │
+│  │  (yt-dlp)   │    │  (Whisper)  │    │  (Gemini)   │    │ (MediaPipe) │       │
 │  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘       │
 │                                                                   │              │
 │                                                                   ▼              │
@@ -225,14 +226,13 @@ Output: Detection frames with face/pose data per timestamp
 | `FrameExtractor` | FFmpeg | Extract frames at intervals |
 
 **Face Detection Multi-Tier Fallback:**
-The face detector uses 4 backends in priority order for robust detection:
+The face detector uses 3 backends in priority order for robust detection:
 
 | Tier | Model | Best For |
 |------|-------|----------|
 | 1 | MediaPipe FaceDetection (short-range) | Close-up faces, primary detector |
 | 2 | MediaPipe FaceDetection (full-range) | Small/distant faces (webcam overlays) |
-| 3 | YOLOv8n | General face detection fallback |
-| 4 | Haar Cascade | Final fallback for edge cases |
+| 3 | Haar Cascade | Final fallback for edge cases |
 
 - **MIN_FACE_AREA_RATIO**: 0.1% (allows ~45x45 face in 1080p)
 - **Confidence threshold**: 0.5 (primary), 0.3 (full-range fallback)
@@ -580,7 +580,7 @@ viewcreator-genesis/
 │   │   ├── transcription_service.py   # Groq Whisper
 │   │   ├── intelligence_planner.py    # Gemini planning
 │   │   ├── detection_pipeline.py      # Detection orchestrator
-│   │   ├── face_detector.py           # YOLOv8 faces
+│   │   ├── face_detector.py           # MediaPipe + Haar faces
 │   │   ├── pose_estimator.py          # MediaPipe poses
 │   │   ├── tracker.py                 # DeepSORT tracking
 │   │   ├── frame_extractor.py         # FFmpeg frame extraction
@@ -593,8 +593,7 @@ viewcreator-genesis/
 │   └── schemas/
 │       ├── requests.py                # Pydantic request models
 │       └── responses.py               # Pydantic response models
-├── models/                        # Pre-downloaded ML models
-│   └── yolov8n.pt
+├── models/                        # Pre-downloaded ML models (Haar cascades)
 ├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
@@ -860,8 +859,10 @@ All other settings are hardcoded in `app/config.py` for consistency:
 | Split Layout | 50% / 50% | Screen (top) / Face (bottom) |
 | Transcription Model | whisper-large-v3-turbo | Groq Whisper model |
 | Gemini Model | google/gemini-2.5-flash | AI planning model |
-| Face Detection | Multi-tier fallback | MediaPipe + YOLO + Haar |
+| Face Detection | Multi-tier fallback | MediaPipe + Haar Cascade |
 | Caption Style | Arial Black, 72px, Gold highlight | Word-by-word highlighting |
+| Parallel Rendering | asyncio.gather | Max 3 concurrent FFmpeg processes |
+| Parallel S3 Uploads | asyncio.gather | Concurrent clip uploads |
 
 ---
 
