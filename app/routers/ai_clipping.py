@@ -17,7 +17,10 @@ from app.auth import verify_api_key
 DurationRangeType = Literal["short", "medium", "long"]
 
 # Layout type for clip rendering
-LayoutTypeInput = Literal["split_screen", "talking_head"]
+# - "auto": AI-powered dynamic layout detection - switches between layouts mid-clip
+# - "split_screen": Screen content on top, face on bottom (forced for entire clip)
+# - "talking_head": Face-focused dynamic crop (forced for entire clip)
+LayoutTypeInput = Literal["auto", "split_screen", "talking_head"]
 
 # Duration range configuration
 DURATION_RANGE_CONFIG = {
@@ -97,8 +100,8 @@ class ClipJobSubmitRequest(BaseModel):
     )
     caption_style: Optional[CaptionStyleInput] = Field(None, description="Custom caption styling (used if caption_preset not provided)")
     layout_type: Optional[LayoutTypeInput] = Field(
-        "split_screen",
-        description="Layout type: 'split_screen' (screen top, face bottom), 'talking_head' (face-focused)"
+        "auto",
+        description="Layout type: 'auto' (AI detects and switches mid-clip), 'split_screen' (screen top, face bottom), 'talking_head' (face-focused)"
     )
     callback_url: Optional[str] = Field(None, description="Webhook URL for progress updates")
 

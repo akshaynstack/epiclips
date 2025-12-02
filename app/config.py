@@ -39,6 +39,7 @@ class LayoutType:
 
     Users can select from these layouts to control how clips are composed.
     """
+    AUTO = "auto"                    # AI-powered dynamic layout detection - switches mid-clip
     SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (50/50 split)
     TALKING_HEAD = "talking_head"    # Face-focused single crop that follows the speaker
 
@@ -57,6 +58,16 @@ def get_layout_preset(layout_id: str) -> dict:
         ValueError: If layout_id is not recognized
     """
     presets = {
+        LayoutType.AUTO: {
+            "id": LayoutType.AUTO,
+            "name": "Auto (Recommended)",
+            "description": "AI detects layout changes and switches dynamically mid-clip - best for mixed content",
+            "screen_ratio": 0.50,  # Used when screen_share detected
+            "face_ratio": 0.50,    # Used when screen_share detected
+            "requires_face": False,
+            "requires_screen": False,
+            "dynamic": True,  # Indicates this uses SmartLayoutDetector
+        },
         LayoutType.SPLIT_SCREEN: {
             "id": LayoutType.SPLIT_SCREEN,
             "name": "Split Screen",
@@ -92,6 +103,13 @@ def get_available_layouts() -> list[dict]:
         List of layout info dicts with id, name, description, and preview info
     """
     return [
+        {
+            "id": LayoutType.AUTO,
+            "name": "Auto (Recommended)",
+            "description": "AI detects layout changes and switches dynamically mid-clip - best for mixed content",
+            "icon": "sparkles",  # lucide icon name for frontend
+            "preview_layout": {"dynamic": True},
+        },
         {
             "id": LayoutType.SPLIT_SCREEN,
             "name": "Split Screen",
