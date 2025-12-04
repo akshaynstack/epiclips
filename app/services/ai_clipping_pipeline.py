@@ -355,11 +355,12 @@ class AIClippingPipeline:
                             else:  # screen_share
                                 adjusted_caption_style.position = "center"
                         
-                        # Log embedded facecam detection status
-                        has_embedded = layout_analysis.has_embedded_facecam if layout_analysis else False
+                        # DISABLED: has_embedded_facecam detection was blocking split screen
+                        # Always set to False - we want split screen for face + screen content
+                        has_embedded = False  # layout_analysis.has_embedded_facecam if layout_analysis else False
                         logger.info(
                             f"Clip {i + 1} render config: layout={effective_layout}, "
-                            f"has_embedded_facecam={has_embedded}"
+                            f"has_embedded_facecam={has_embedded} (disabled)"
                         )
                         
                         render_request = RenderRequest(

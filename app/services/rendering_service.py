@@ -141,14 +141,17 @@ class RenderingService:
             and request.primary_timeline
             and request.secondary_timeline
         ):
-            # Use split layout (screen top, face bottom, captions overlaid)
+            # Use split layout (screen top 50%, face bottom 50%, captions overlaid)
             if self.settings.use_split_layout:
                 await self._render_split_mode(request, caption_path, duration_ms)
             else:
                 # Fallback to standard stack mode
                 await self._render_stack_mode(request, caption_path, duration_ms)
+        elif request.layout_type == "talking_head" and request.primary_timeline:
+            # Talking head: single 9:16 full-height crop following the face
+            await self._render_focus_mode(request, caption_path, duration_ms)
         elif request.primary_timeline:
-            # Focus mode: single dynamic pan
+            # Fallback focus mode for any other case with timeline
             await self._render_focus_mode(request, caption_path, duration_ms)
         else:
             # Static fallback

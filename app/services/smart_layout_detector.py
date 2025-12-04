@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 # Minimum segment duration in milliseconds to avoid flickering
 MIN_SEGMENT_DURATION_MS = 2000  # 2 seconds
 
-# Layout classification thresholds
-FACE_AREA_THRESHOLD_TALKING_HEAD = 0.12  # Face > 12% of frame = talking head
-FACE_AREA_THRESHOLD_SCREEN_SHARE = 0.08  # Face < 8% of frame = likely screen share
-EDGE_DENSITY_THRESHOLD = 0.06  # High edge density suggests UI/text (screen share)
-CORNER_THRESHOLD = 0.35  # Face in outer 35% considered "corner"
+# Layout classification thresholds (simplified for robustness)
+# Key insight: If face exists AND edge density is high -> screen_share (split screen)
+# If face is large and centered with low edge density -> talking_head
+FACE_AREA_THRESHOLD_TALKING_HEAD = 0.15  # Face > 15% of frame = talking head
+EDGE_DENSITY_THRESHOLD = 0.04  # Lower threshold - any UI content triggers screen_share
+CORNER_THRESHOLD = 0.30  # Face in outer 30% considered "corner"
 
 
 @dataclass
@@ -368,32 +369,44 @@ class SmartLayoutDetector:
         has_face: bool,
     ) -> tuple[str, float]:
         """
-        Determine layout type based on analysis signals.
-
+        Determine layout type using simplified binary logic.
+        
+        Key insight from OpusClip/Klap research:
+        - Face in corner + screen content = screen_share (split screen)
+        - Large/medium centered face = talking_head (9:16 full height)
+        
         Returns:
             Tuple of (layout_type, confidence)
         """
-        # Strong talking head indicators
+        # Rule 1: Face in corner = screen_share (typical screen recording with facecam PiP)
+        # This is the clearest signal for screen share
+        if has_face and face_in_corner:
+            return ("screen_share", 0.95)
+        
+        # Rule 2: Large face (>15%) centered = talking head
+        # Person is the main content, no need for split screen
         if face_area_ratio > FACE_AREA_THRESHOLD_TALKING_HEAD and not face_in_corner:
             return ("talking_head", 0.95)
-
-        # Strong screen share indicators
-        if face_in_corner and face_area_ratio < FACE_AREA_THRESHOLD_SCREEN_SHARE:
+        
+        # Rule 3: Medium face (8-15%) centered with low edge density = talking head
+        # Person talking with simple background (office, room, etc.)
+        if face_area_ratio > 0.08 and not face_in_corner and edge_density < 0.08:
+            return ("talking_head", 0.85)
+        
+        # Rule 4: Small face + HIGH edge density = screen_share (screen recording with small facecam)
+        if has_face and face_area_ratio < 0.08 and edge_density > 0.10:
             return ("screen_share", 0.90)
-
+        
+        # Rule 5: No face but high edge density = pure screen share
         if not has_face and edge_density > EDGE_DENSITY_THRESHOLD:
-            # No face + high edge density = pure screen share
             return ("screen_share", 0.85)
-
-        # Medium face, not in corner - likely talking head with some screen content
-        if face_area_ratio > FACE_AREA_THRESHOLD_SCREEN_SHARE and not face_in_corner:
+        
+        # Rule 6: Face exists, not in corner = default to talking head
+        # When in doubt with a centered face, use talking head (9:16 focus)
+        if has_face and not face_in_corner:
             return ("talking_head", 0.70)
-
-        # Small face, not clearly in corner, with high edge density
-        if edge_density > EDGE_DENSITY_THRESHOLD and face_area_ratio < FACE_AREA_THRESHOLD_TALKING_HEAD:
-            return ("screen_share", 0.65)
-
-        # Default to talking head with low confidence
+        
+        # Default: No face, low edge density - treat as talking head
         return ("talking_head", 0.50)
 
     def _create_segments_from_analyses(
