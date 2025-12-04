@@ -61,6 +61,10 @@ class RenderRequest:
     # Captions
     transcript_segments: Optional[list[TranscriptSegment]] = None
     caption_style: Optional[CaptionStyle] = None
+    
+    # Embedded facecam flag - if True, video already has PiP facecam
+    # In this case, we should NOT do split screen to avoid duplicating the face
+    has_embedded_facecam: bool = False
 
 
 @dataclass
@@ -137,7 +141,7 @@ class RenderingService:
             and request.primary_timeline
             and request.secondary_timeline
         ):
-            # Use split layout if enabled (screen top, face bottom, captions overlaid)
+            # Use split layout (screen top, face bottom, captions overlaid)
             if self.settings.use_split_layout:
                 await self._render_split_mode(request, caption_path, duration_ms)
             else:
@@ -289,6 +293,76 @@ class RenderingService:
                     except Exception:
                         pass
 
+    async def _render_embedded_facecam_mode(
+        self,
+        request: RenderRequest,
+        caption_path: Optional[str],
+        duration_ms: int,
+    ) -> None:
+        """
+        Render video that already has an embedded facecam (picture-in-picture).
+
+        This mode preserves the original screen layout with the embedded facecam
+        by taking a full-width crop centered on the content. This avoids duplicating
+        the face that would happen with split screen mode.
+
+        The crop takes the full width of the source video and calculates the height
+        to match the 9:16 aspect ratio, then centers the crop vertically.
+        """
+        source_w = request.source_width
+        source_h = request.source_height
+        target_width = self.settings.target_output_width
+        target_height = self.settings.target_output_height
+
+        # Get actual video dimensions to ensure crop is valid
+        actual_width, actual_height = await self._get_video_dimensions(request.video_path)
+        if actual_width > 0 and actual_height > 0:
+            source_w = actual_width
+            source_h = actual_height
+
+        # Calculate crop dimensions to fit 9:16 while preserving full width
+        target_aspect = target_width / target_height  # 9:16 = 0.5625
+
+        # Take FULL WIDTH of source, calculate height for 9:16
+        crop_width = source_w
+        crop_height = int(source_w / target_aspect)
+
+        # If calculated height exceeds source, use full height and adjust width
+        if crop_height > source_h:
+            crop_height = source_h
+            crop_width = int(source_h * target_aspect)
+
+        # Center the crop (slight bias toward upper portion for screen content)
+        crop_x = max(0, (source_w - crop_width) // 2)
+        crop_y = max(0, (source_h - crop_height) // 3)  # Bias toward top
+
+        # Ensure crop stays within bounds
+        crop_x = min(crop_x, source_w - crop_width)
+        crop_y = min(crop_y, source_h - crop_height)
+
+        logger.info(
+            f"Embedded facecam mode: source={source_w}x{source_h}, "
+            f"crop={crop_width}x{crop_height} at ({crop_x}, {crop_y}) "
+            f"-> scale to {target_width}x{target_height}"
+        )
+
+        # Build filter chain: crop -> scale -> optional captions
+        filters = [
+            f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
+            f"scale={target_width}:{target_height}",
+        ]
+
+        if caption_path and os.path.isfile(caption_path):
+            filters.append(f"ass={self._escape_filter_path(caption_path)}")
+
+        await self._run_ffmpeg(
+            input_path=request.video_path,
+            output_path=request.output_path,
+            start_time_ms=request.start_time_ms,
+            duration_ms=duration_ms,
+            video_filters=filters,
+        )
+
     async def _render_split_screen(
         self,
         input_path: str,
@@ -302,36 +376,50 @@ class RenderingService:
         """
         Render screen content for split layout (top region).
 
-        Takes a SQUARE crop from the CENTER of the original frame,
-        then resizes to fill the target width. This captures the screen
-        content (typically in the middle of the frame).
+        For screen share content, we want to capture the main screen area
+        (typically center of frame) and scale it to fill the top region.
+        
+        Strategy: Take a crop from the CENTER of the frame that matches
+        the target aspect ratio, then scale to fit.
         """
         source_w = timeline.source_width
         source_h = timeline.source_height
 
-        # Take a square crop from the CENTER of the frame
-        # Use the smaller dimension to ensure the crop fits
-        square_size = min(source_w, source_h)
+        # Calculate the aspect ratio we need for the target region
+        target_aspect = target_width / target_height  # e.g., 1080/960 = 1.125
 
-        # Safety check: ensure square_size doesn't exceed actual source
-        square_size = min(square_size, source_w, source_h)
+        # Calculate crop dimensions that match target aspect ratio
+        # and fit within the source frame
+        if source_w / source_h > target_aspect:
+            # Source is wider than target - crop width, use full height
+            crop_height = source_h
+            crop_width = int(source_h * target_aspect)
+        else:
+            # Source is taller than target - crop height, use full width
+            crop_width = source_w
+            crop_height = int(source_w / target_aspect)
 
-        # Center the square crop
-        crop_x = max(0, (source_w - square_size) // 2)
-        crop_y = max(0, (source_h - square_size) // 2)
+        # Center the crop in the frame
+        crop_x = (source_w - crop_width) // 2
+        crop_y = (source_h - crop_height) // 2
+
+        # Bias toward top for screen content (UI usually at top)
+        crop_y = max(0, crop_y - int(crop_height * 0.1))
+
+        # Ensure bounds
+        crop_x = max(0, min(crop_x, source_w - crop_width))
+        crop_y = max(0, min(crop_y, source_h - crop_height))
 
         logger.info(
             f"Split SCREEN crop: source={source_w}x{source_h}, "
-            f"square {square_size}x{square_size} from center at ({crop_x}, {crop_y}) "
+            f"crop {crop_width}x{crop_height} at ({crop_x}, {crop_y}) "
             f"-> scale to {target_width}x{target_height}"
         )
 
-        # Crop square from center, then scale to fill target width
-        # The height will be cropped to fit the target aspect ratio
+        # Crop center region, then scale to target dimensions
         filters = [
-            f"crop={square_size}:{square_size}:{crop_x}:{crop_y}",
-            f"scale={target_width}:-1",  # Scale to target width, maintain aspect
-            f"crop={target_width}:{target_height}:0:(ih-{target_height})/2",  # Center crop to target height
+            f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
+            f"scale={target_width}:{target_height}",
         ]
 
         await self._run_ffmpeg(
@@ -354,11 +442,10 @@ class RenderingService:
         duration_ms: int,
     ) -> None:
         """
-        Render tight face crop for split layout (bottom region).
+        Render face crop for split layout (bottom region).
 
-        Creates a TIGHT SQUARE crop around the detected face position,
-        then scales UP dramatically to fill the bottom region.
-        This creates a close-up portrait view of the speaker.
+        Creates a crop around the detected face position that matches
+        the target aspect ratio, then scales to fill the bottom region.
         """
         keyframes = timeline.keyframes
 
@@ -369,44 +456,50 @@ class RenderingService:
         source_w = timeline.source_width
         source_h = timeline.source_height
 
-        # CRITICAL: Calculate crop size as fraction of source to ensure it fits
-        # Use 1/3 of the smaller dimension for a tight face crop
-        max_safe_crop = min(source_w, source_h) // 3
-        max_safe_crop = max(max_safe_crop, 200)  # Minimum for quality
+        # Calculate crop dimensions that match target aspect ratio
+        target_aspect = target_width / target_height  # e.g., 1080/960 = 1.125
 
-        # Use the window dimensions from timeline, but cap strictly
-        crop_size = max(timeline.window_width, timeline.window_height)
-        crop_size = max(crop_size, 150)  # Minimum size
-        crop_size = min(crop_size, max_safe_crop)  # Cap at 1/3 of source
+        # Use the window size from timeline as base, but ensure aspect ratio matches
+        base_size = max(timeline.window_width, timeline.window_height)
+        base_size = max(base_size, 300)  # Minimum for quality
+        
+        # Calculate crop dimensions matching target aspect
+        if target_aspect >= 1:
+            # Wider than tall
+            crop_width = base_size
+            crop_height = int(base_size / target_aspect)
+        else:
+            # Taller than wide
+            crop_height = base_size
+            crop_width = int(base_size * target_aspect)
 
-        # Center the square crop on the face position
-        max_x = source_w - crop_size
-        max_y = source_h - crop_size
+        # Ensure crop fits in source
+        if crop_width > source_w:
+            crop_width = source_w
+            crop_height = int(crop_width / target_aspect)
+        if crop_height > source_h:
+            crop_height = source_h
+            crop_width = int(crop_height * target_aspect)
 
-        # Ensure we have valid crop bounds
-        max_x = max(0, max_x)
-        max_y = max(0, max_y)
+        # Center the crop on the face position
+        crop_x = int(avg_center_x - crop_width / 2)
+        crop_y = int(avg_center_y - crop_height / 2)
 
-        crop_x = max(0, min(max_x, int(avg_center_x - crop_size / 2)))
-        crop_y = max(0, min(max_y, int(avg_center_y - crop_size / 2)))
-
-        # Calculate scale factor needed to fill target width
-        scale_factor = target_width / crop_size
-        scaled_height = int(crop_size * scale_factor)
+        # Ensure bounds
+        crop_x = max(0, min(crop_x, source_w - crop_width))
+        crop_y = max(0, min(crop_y, source_h - crop_height))
 
         logger.info(
             f"Split FACE crop: source={source_w}x{source_h}, "
-            f"crop={crop_size}x{crop_size} at ({crop_x}, {crop_y}) "
-            f"-> scale {scale_factor:.2f}x to {target_width}x{scaled_height} "
-            f"-> final {target_width}x{target_height}"
+            f"face_center=({avg_center_x:.0f}, {avg_center_y:.0f}), "
+            f"crop={crop_width}x{crop_height} at ({crop_x}, {crop_y}) "
+            f"-> scale to {target_width}x{target_height}"
         )
 
-        # Crop tight square around face, scale UP to fill target width,
-        # then crop height from CENTER to fit target dimensions
+        # Crop around face, then scale to target dimensions
         filters = [
-            f"crop={crop_size}:{crop_size}:{crop_x}:{crop_y}",
-            f"scale={target_width}:-1",  # Scale to target width, maintaining aspect
-            f"crop={target_width}:{target_height}:(iw-{target_width})/2:(ih-{target_height})/2",
+            f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
+            f"scale={target_width}:{target_height}",
         ]
 
         await self._run_ffmpeg(

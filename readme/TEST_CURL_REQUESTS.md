@@ -11,10 +11,25 @@ curl -X POST http://localhost:8000/ai-clipping/jobs \
   -H "Content-Type: application/json" \
   -H "X-Genesis-API-Key: dev-api-key-12345" \
   -d '{
-    "video_url": "https://www.youtube.com/watch?v=fPkGIdBVB3Y",
+    "video_url": "https://www.youtube.com/watch?v=oWqbdZ-C7uQ",
     "max_clips": 3,
     "include_captions": true,
     "caption_preset": "viral_gold"
+  }'
+```
+
+### Curl for creating job
+
+```
+curl -X POST http://localhost:8000/ai-clipping/jobs \
+  -H "Content-Type: application/json" \
+  -H "X-Genesis-API-Key: dev-api-key-12345" \
+  -d '{
+    "video_url": "https://www.youtube.com/watch?v=wgpyQSDGh3k",
+    "max_clips": 3,
+    "include_captions": true,
+    "caption_preset": "viral_gold",
+    "duration_ranges": ["short"]
   }'
 ```
 

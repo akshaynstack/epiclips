@@ -28,6 +28,7 @@ groq>=0.4.2                 # Groq API (fast Whisper transcription)
 yt-dlp>=2024.1.0
 yt-dlp-ejs
 rnet                        # Browser impersonation for YouTube anti-bot bypass
+PySocks                     # SOCKS proxy support for yt-dlp
 
 # Utilities
 httpx==0.26.0               # Async HTTP client

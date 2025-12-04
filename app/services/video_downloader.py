@@ -103,11 +103,15 @@ class VideoDownloaderService:
 
     def _get_format_selector(self) -> str:
         """
-        Returns a flexible format selector that works reliably.
-        Uses multiple fallbacks to avoid 'Requested format not available' errors.
+        Returns a format selector that prioritizes 1080p quality.
+        Uses multiple fallbacks to ensure we get the best available quality.
         """
-        # Very flexible format - prefer 1080p but accept anything available
-        return "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best"
+        # Prioritize 1080p, then 720p, then best available
+        # First try exact 1080p, then >=720p, then best available
+        return (
+            "bestvideo[height=1080]+bestaudio/bestvideo[height>=720]+bestaudio/"
+            "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best"
+        )
 
     def _build_ytdlp_opts(
         self,
@@ -284,11 +288,18 @@ class VideoDownloaderService:
             )
 
         logger.info(f"Downloading video from YouTube: {url}")
+        logger.info(f"Using proxy: {self.settings.ytdlp_proxy or 'None'}")
+        logger.info(f"rnet available: {is_rnet_available()}")
 
-        # Format selectors from most preferred to fallback
+        # Format selectors prioritizing 1080p, then 720p, then best available
         format_selectors = [
+            # Priority 1: Exact 1080p with audio
+            "bestvideo[height=1080]+bestaudio/bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]",
+            # Priority 2: 720p or higher
+            "bestvideo[height>=720]+bestaudio/bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]",
+            # Priority 3: Best available up to 1080p
             "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
-            "best[height<=1080]/best",
+            # Final fallback
             "best",
         ]
 
@@ -361,6 +372,19 @@ class VideoDownloaderService:
         # This ensures we have the real dimensions of the downloaded file,
         # not the pre-download estimates from yt-dlp info
         actual_metadata = await self._get_video_metadata_ffprobe(output_path)
+
+        # Log the actual downloaded resolution for debugging
+        logger.info(
+            f"Downloaded video quality: {actual_metadata.width}x{actual_metadata.height} "
+            f"@ {actual_metadata.fps}fps ({file_size / 1024 / 1024:.1f} MB)"
+        )
+        
+        # Warn if we got low quality (less than 720p)
+        if actual_metadata.height < 720:
+            logger.warning(
+                f"WARNING: Downloaded video is only {actual_metadata.height}p! "
+                f"Expected 720p or higher. Proxy: {self.settings.ytdlp_proxy or 'None'}"
+            )
 
         # Preserve useful info from yt-dlp metadata (title, uploader, etc.)
         # but use actual dimensions from ffprobe

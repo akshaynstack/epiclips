@@ -355,6 +355,13 @@ class AIClippingPipeline:
                             else:  # screen_share
                                 adjusted_caption_style.position = "center"
                         
+                        # Log embedded facecam detection status
+                        has_embedded = layout_analysis.has_embedded_facecam if layout_analysis else False
+                        logger.info(
+                            f"Clip {i + 1} render config: layout={effective_layout}, "
+                            f"has_embedded_facecam={has_embedded}"
+                        )
+                        
                         render_request = RenderRequest(
                             video_path=download_result.video_path,
                             output_path=output_path,
@@ -367,6 +374,7 @@ class AIClippingPipeline:
                             secondary_timeline=screen_timeline,
                             transcript_segments=clip_transcript if request.include_captions else None,
                             caption_style=adjusted_caption_style,
+                            has_embedded_facecam=has_embedded,
                         )
                         
                         render_result = await self.rendering_service.render_clip(render_request)

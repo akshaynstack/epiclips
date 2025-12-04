@@ -67,6 +67,7 @@ class LayoutAnalysis:
     layout_segments: list[LayoutSegment] = field(default_factory=list)
     transition_timestamps: list[int] = field(default_factory=list)
     frame_analyses: list[FrameLayoutInfo] = field(default_factory=list)
+    has_embedded_facecam: bool = False  # True if face is already embedded in screen content
 
     @property
     def segment_count(self) -> int:
@@ -145,6 +146,10 @@ class SmartLayoutDetector:
         # Determine dominant layout
         dominant_layout = self._calculate_dominant_layout(merged_segments)
 
+        # Check if face is embedded in screen content (small face in corner with high edge density)
+        # This indicates the video already has a picture-in-picture layout and we should NOT split
+        has_embedded_facecam = self._detect_embedded_facecam(frame_analyses)
+
         # Extract transition timestamps
         transitions = []
         for i in range(1, len(merged_segments)):
@@ -154,7 +159,8 @@ class SmartLayoutDetector:
 
         logger.info(
             f"Layout analysis complete: {len(merged_segments)} segments, "
-            f"transitions={has_transitions}, dominant={dominant_layout}"
+            f"transitions={has_transitions}, dominant={dominant_layout}, "
+            f"embedded_facecam={has_embedded_facecam}"
         )
 
         for seg in merged_segments:
@@ -169,6 +175,7 @@ class SmartLayoutDetector:
             layout_segments=merged_segments,
             transition_timestamps=transitions,
             frame_analyses=frame_analyses,
+            has_embedded_facecam=has_embedded_facecam,
         )
 
     async def _analyze_frames(
@@ -538,6 +545,81 @@ class SmartLayoutDetector:
                 screen_share_duration += seg.duration_ms
 
         return "talking_head" if talking_head_duration >= screen_share_duration else "screen_share"
+
+    def _detect_embedded_facecam(
+        self,
+        frame_analyses: list[FrameLayoutInfo],
+    ) -> bool:
+        """
+        Detect if the video has an embedded facecam (picture-in-picture) or 
+        side-by-side layout where the face is already part of the screen recording.
+
+        When a video already has a facecam overlay/layout embedded in the screen recording,
+        we should NOT do split screen as it would duplicate the face or mess up the layout.
+
+        Indicators of embedded facecam/layout:
+        1. Consistent small face in corner (face_in_corner=True) - classic PiP
+        2. High edge density (UI/screen content with face overlay)
+        3. Small face area ratio (< 15% of frame) with screen content
+        4. Screen share layout detected consistently
+
+        Returns:
+            True if embedded facecam detected, False otherwise
+        """
+        if not frame_analyses:
+            return False
+
+        # Count frames with various indicators
+        embedded_indicators = 0
+        screen_share_with_face_in_corner = 0
+        screen_share_with_small_face = 0
+        screen_share_count = 0
+
+        for frame in frame_analyses:
+            # Track all screen_share frames
+            if frame.layout_type == "screen_share":
+                screen_share_count += 1
+                
+                # Small face with high edge density = embedded facecam
+                if frame.face_area_ratio < 0.15 and frame.edge_density > 0.04:
+                    screen_share_with_small_face += 1
+                
+                # Face in corner = classic PiP
+                if frame.face_in_corner:
+                    screen_share_with_face_in_corner += 1
+
+            # Check for the classic embedded facecam pattern:
+            # - Small face (< 15% of frame) in a corner or anywhere
+            # - High edge density (screen content)
+            if frame.face_area_ratio < 0.15 and frame.face_area_ratio > 0.001:
+                if frame.edge_density > 0.04:  # Has screen content
+                    embedded_indicators += 1
+
+        # Calculate ratios
+        total_frames = len(frame_analyses)
+        embedded_ratio = embedded_indicators / total_frames if total_frames > 0 else 0
+        corner_face_ratio = screen_share_with_face_in_corner / total_frames if total_frames > 0 else 0
+        screen_share_ratio = screen_share_count / total_frames if total_frames > 0 else 0
+        small_face_screen_ratio = screen_share_with_small_face / total_frames if total_frames > 0 else 0
+
+        # Detect embedded facecam if:
+        # 1. Majority of frames are screen_share with small face, OR
+        # 2. High embedded indicator ratio, OR
+        # 3. Consistent face in corner pattern
+        has_embedded = (
+            embedded_ratio >= 0.50 or 
+            corner_face_ratio >= 0.60 or
+            small_face_screen_ratio >= 0.50 or
+            (screen_share_ratio >= 0.70 and embedded_ratio >= 0.30)
+        )
+
+        logger.info(
+            f"Embedded facecam analysis: embedded_ratio={embedded_ratio:.2f}, "
+            f"corner_face_ratio={corner_face_ratio:.2f}, screen_share_ratio={screen_share_ratio:.2f}, "
+            f"small_face_screen_ratio={small_face_screen_ratio:.2f} -> has_embedded={has_embedded}"
+        )
+
+        return has_embedded
 
     def analyze_clip_layout_sync(
         self,
