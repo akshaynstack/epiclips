@@ -59,7 +59,7 @@ async def model_status(request: Request):
             "face_detector": {
                 "loaded": face_detector is not None,
                 "ready": face_detector.is_ready() if face_detector else False,
-                "model_type": "YOLOv8" if face_detector else None,
+                "model_type": "MediaPipe + Haar Cascade" if face_detector else None,
             },
             "pose_estimator": {
                 "loaded": pose_estimator is not None,

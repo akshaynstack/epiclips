@@ -2,7 +2,7 @@
 FastAPI application entry point for ViewCreator Genesis.
 
 Genesis is ViewCreator's media processing engine, providing:
-1. Video detection (YOLO face detection, MediaPipe pose estimation, DeepSORT tracking)
+1. Video detection (MediaPipe face detection, pose estimation, DeepSORT tracking)
 2. Full AI clipping pipeline (transcription, intelligence planning, rendering)
 """
 
@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import shutil
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -21,6 +22,10 @@ from app.routers import ai_clipping, detection, health
 from app.services.detection_pipeline import DetectionPipeline
 from app.services.face_detector import FaceDetector
 from app.services.pose_estimator import PoseEstimator
+
+# Windows-specific: Use ProactorEventLoop to support asyncio.create_subprocess_exec
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # Configure logging
 logging.basicConfig(
@@ -81,12 +86,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info(f"Max concurrent jobs: {settings.max_concurrent_jobs}")
 
     # Load ML models
-    logger.info("Loading YOLO face detection model...")
+    logger.info("Loading MediaPipe face detection model...")
     face_detector = FaceDetector(
-        model_path=settings.yolo_model_path,
         confidence_threshold=settings.face_confidence_threshold,
     )
-    logger.info("YOLO model loaded successfully")
+    logger.info("Face detector loaded successfully (MediaPipe + Haar Cascade)")
 
     logger.info("Loading MediaPipe pose estimation model...")
     pose_estimator = PoseEstimator(
@@ -158,7 +162,7 @@ AI-powered video processing and content creation service.
 ## Features
 
 ### Detection API (`/detect`)
-- YOLO face detection
+- MediaPipe face detection with Haar Cascade fallback
 - MediaPipe pose estimation
 - DeepSORT object tracking
 
@@ -205,8 +209,9 @@ async def root():
         "version": "2.0.0",
         "status": "running",
         "features": {
-            "detection": "YOLO + MediaPipe + DeepSORT",
+            "detection": "MediaPipe + Haar + DeepSORT",
             "ai_clipping": "Transcription + Intelligence + Rendering",
+            "parallel_processing": True,
         },
         "docs": "/docs",
     }

@@ -2,12 +2,11 @@
 Face detection service with multi-tier detection fallback.
 
 Detection Priority:
-1. MediaPipe FaceDetection (purpose-built, most accurate for faces)
-2. YOLOv8-face model (if available)
-3. YOLOv8 person -> face estimate (fallback)
-4. Haar Cascade (final fallback)
+1. MediaPipe FaceDetection short-range (purpose-built, most accurate for close-up faces)
+2. MediaPipe FaceDetection full-range (for small/distant faces)
+3. Haar Cascade (final fallback for edge cases)
 
-Multi-tier architecture for superior face tracking.
+Multi-tier architecture for robust face tracking with minimal dependencies.
 """
 
 import logging
@@ -48,9 +47,7 @@ class FaceDetector:
     Uses a priority chain of detectors for maximum reliability:
     1. MediaPipe FaceDetection short-range (best for close faces)
     2. MediaPipe FaceDetection full-range (better for small/distant faces)
-    3. YOLOv8-face model (if available)
-    4. YOLOv8 person detection with face estimation
-    5. Haar Cascade (classical CV fallback)
+    3. Haar Cascade (classical CV fallback)
 
     Also provides outlier rejection to filter false positives.
     """
@@ -62,7 +59,6 @@ class FaceDetector:
 
     def __init__(
         self,
-        model_path: str = "yolov8n-face.pt",
         confidence_threshold: float = 0.5,
         device: str = "cpu",
     ):
@@ -70,18 +66,15 @@ class FaceDetector:
         Initialize face detector with multi-tier fallback.
         
         Args:
-            model_path: Path to YOLO model weights
             confidence_threshold: Minimum confidence for detections
             device: Device to run inference on ('cpu' or 'cuda')
         """
-        self.model_path = model_path
         self.confidence_threshold = confidence_threshold
         self.device = device
         
         # Detection backends
         self._mediapipe_detector = None
         self._mediapipe_detector_fullrange = None  # Full-range model for small/distant faces
-        self._yolo_model = None
         self._haar_cascade = None
         self._dnn_net = None
 
@@ -113,36 +106,6 @@ class FaceDetector:
             logger.warning("MediaPipe not available, will use fallback detectors")
         except Exception as e:
             logger.warning(f"MediaPipe FaceDetection failed to initialize: {e}")
-
-        # 2. YOLO model (secondary)
-        try:
-            import torch
-            _original_torch_load = torch.load
-            
-            def _patched_torch_load(*args, **kwargs):
-                if 'weights_only' not in kwargs:
-                    kwargs['weights_only'] = False
-                return _original_torch_load(*args, **kwargs)
-            
-            torch.load = _patched_torch_load
-            
-            from ultralytics import YOLO
-
-            if os.path.exists(self.model_path):
-                logger.info(f"Loading YOLO model from {self.model_path}")
-                self._yolo_model = YOLO(self.model_path)
-                detectors_loaded.append(f"YOLO ({self.model_path})")
-            else:
-                logger.info(f"Model {self.model_path} not found, using yolov8n.pt")
-                self._yolo_model = YOLO("yolov8n.pt")
-                detectors_loaded.append("YOLO (yolov8n.pt person detection)")
-
-            torch.load = _original_torch_load
-            self._yolo_model.to(self.device)
-            logger.info(f"YOLO model loaded on {self.device}")
-
-        except Exception as e:
-            logger.warning(f"Failed to load YOLO model: {e}")
 
         # 3. OpenCV DNN face detector (tertiary fallback)
         try:
@@ -221,15 +184,6 @@ class FaceDetector:
             except Exception as e:
                 logger.warning(f"MediaPipe full-range detection failed: {e}")
 
-        # Try YOLO if MediaPipe found nothing
-        if self._yolo_model is not None and not detections:
-            try:
-                detections = self._detect_with_yolo(image, width, height)
-                if detections:
-                    logger.debug(f"YOLO detected {len(detections)} faces")
-            except Exception as e:
-                logger.warning(f"YOLO detection failed: {e}")
-
         # Try OpenCV DNN if still nothing
         if self._dnn_net is not None and not detections:
             try:
@@ -303,51 +257,6 @@ class FaceDetector:
                         detection_method="mediapipe_fullrange" if use_fullrange else "mediapipe",
                     ))
 
-        return detections
-
-    def _detect_with_yolo(
-        self,
-        image: np.ndarray,
-        width: int,
-        height: int,
-    ) -> List[FaceDetectionResult]:
-        """Detect faces using YOLO model."""
-        detections = []
-        
-        results = self._yolo_model(
-            image,
-            conf=self.confidence_threshold,
-            verbose=False,
-        )
-
-        if results and len(results) > 0:
-            result = results[0]
-            
-            for box in result.boxes:
-                cls_id = int(box.cls[0])
-                confidence = float(box.conf[0])
-                
-                # Class 0 is person in standard YOLO, face in face models
-                if cls_id == 0 and confidence >= self.confidence_threshold:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    x, y = int(x1), int(y1)
-                    w, h = int(x2 - x1), int(y2 - y1)
-                    
-                    # If not a face-specific model, estimate face as upper 30% of person
-                    if not self._is_face_model():
-                        face_h = int(h * 0.3)
-                        face_w = min(face_h, w)
-                        face_x = x + (w - face_w) // 2
-                        face_y = y
-                        x, y, w, h = face_x, face_y, face_w, face_h
-                    
-                    if w > 30 and h > 30:
-                        detections.append(FaceDetectionResult(
-                            bbox=(x, y, w, h),
-                            confidence=confidence,
-                            detection_method="yolo" if self._is_face_model() else "yolo_person",
-                        ))
-        
         return detections
 
     def _detect_with_dnn(
@@ -551,14 +460,6 @@ class FaceDetector:
         
         return self.detect_faces(image, frame_index, timestamp_ms)
 
-    def _is_face_model(self) -> bool:
-        """Check if the loaded YOLO model is face-specific."""
-        if self._yolo_model is None:
-            return False
-        
-        model_name = self.model_path.lower()
-        return "face" in model_name
-
     def get_model_info(self) -> dict:
         """Get information about loaded detection backends."""
         backends = []
@@ -567,8 +468,6 @@ class FaceDetector:
             backends.append("mediapipe_shortrange")
         if self._mediapipe_detector_fullrange:
             backends.append("mediapipe_fullrange")
-        if self._yolo_model:
-            backends.append("yolo" if self._is_face_model() else "yolo_person")
         if self._dnn_net is not None:
             backends.append("opencv_dnn")
         if self._haar_cascade is not None:
@@ -578,7 +477,6 @@ class FaceDetector:
             "ready": self._ready,
             "backends": backends,
             "primary": backends[0] if backends else None,
-            "yolo_model_path": self.model_path if self._yolo_model else None,
             "device": self.device,
             "confidence_threshold": self.confidence_threshold,
             "min_face_area_ratio": self.MIN_FACE_AREA_RATIO,
@@ -598,7 +496,6 @@ class FaceDetector:
                 pass
         self._mediapipe_detector = None
         self._mediapipe_detector_fullrange = None
-        self._yolo_model = None
         self._dnn_net = None
         self._haar_cascade = None
         self._ready = False

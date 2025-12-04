@@ -1,11 +1,11 @@
 # =============================================================================
 # ViewCreator Genesis - Multi-stage Dockerfile
 # =============================================================================
-# Stage 1: Build stage - Install dependencies and download models
+# Stage 1: Build stage - Install dependencies
 # Stage 2: Runtime stage - Minimal image for production
 #
 # Genesis is ViewCreator's media processing engine, providing:
-# - Video detection (YOLO, MediaPipe, DeepSORT)
+# - Video detection (MediaPipe, DeepSORT)
 # - Full AI clipping pipeline (transcription, intelligence, rendering)
 # =============================================================================
 
@@ -29,16 +29,9 @@ RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copy requirements and install Python dependencies
-# Install CPU-only PyTorch FIRST to prevent ultralytics from pulling CUDA version
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir \
-    torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
-
-# Download YOLO model weights
-RUN mkdir -p /models && \
-    curl -L -o /models/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
+    pip install --no-cache-dir -r requirements.txt
 
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime
@@ -60,11 +53,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # App config
     APP_HOME=/app \
     TEMP_DIRECTORY=/tmp/genesis \
-    YOLO_MODEL_PATH=/app/models/yolov8n.pt \
     # Disable MediaPipe GPU (use CPU)
     MEDIAPIPE_DISABLE_GPU=1 \
     # yt-dlp config
-    YTDLP_NO_UPDATE=1
+    YTDLP_NO_UPDATE=1 \
+    # Parallel processing defaults
+    MAX_WORKERS=4 \
+    MAX_RENDER_WORKERS=3
 
 WORKDIR $APP_HOME
 
@@ -122,8 +117,8 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 # Copy virtual environment from builder (contains all Python packages)
 COPY --from=builder /opt/venv /opt/venv
 
-# Copy YOLO model weights
-COPY --from=builder /models /app/models
+# Create models directory for Haar cascades (bundled with OpenCV)
+RUN mkdir -p /app/models
 
 # Copy application code
 COPY app/ /app/app/

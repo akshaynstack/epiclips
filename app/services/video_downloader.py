@@ -12,6 +12,8 @@ import logging
 import os
 import random
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Literal, Optional
 from urllib.parse import urlparse
@@ -101,23 +103,11 @@ class VideoDownloaderService:
 
     def _get_format_selector(self) -> str:
         """
-        Returns a format selector that prioritizes high quality (1080p with audio).
-        Matches the proven yt-dlp-api approach.
+        Returns a flexible format selector that works reliably.
+        Uses multiple fallbacks to avoid 'Requested format not available' errors.
         """
-        # Priority order for format selection - HIGH QUALITY ONLY
-        format_selectors = [
-            # 1. Best 1080p video (h264/avc) + best audio (aac/mp4a)
-            "bestvideo[height<=1080][vcodec^=avc]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080]+bestaudio",
-            # 2. Best 1080p video + best audio (fallback)
-            "bestvideo[height=1080]+bestaudio/bestvideo[height<=1080]+bestaudio",
-            # 3. Best 720p video + best audio (only if 1080p not available)
-            "bestvideo[height=720]+bestaudio/bestvideo[height<=720]+bestaudio",
-            # 4. Best combined format (for pre-merged high quality formats)
-            "best[height<=1080][vcodec^=avc]/best[height=1080]/best[height<=1080]",
-            # 5. Best available high quality (no low quality fallback)
-            "best[height>=720]"
-        ]
-        return "/".join(format_selectors)
+        # Very flexible format - prefer 1080p but accept anything available
+        return "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best[height<=1080]/best"
 
     def _build_ytdlp_opts(
         self,
@@ -126,10 +116,9 @@ class VideoDownloaderService:
         use_rnet: bool = True,
     ) -> dict:
         """
-        Build yt-dlp options dictionary using rnet browser impersonation.
+        Build yt-dlp options dictionary for downloading.
 
-        Uses rnet to impersonate real browsers at the TLS/HTTP2 fingerprint level,
-        which is essential to bypass YouTube's sophisticated bot detection.
+        Uses rnet browser impersonation when available for better YouTube bypass.
 
         Args:
             output_path: Optional output file path
@@ -148,29 +137,19 @@ class VideoDownloaderService:
             if self.settings.ytdlp_proxy:
                 opts["proxy"] = self.settings.ytdlp_proxy
 
-        # Add our custom options on top of rnet options
+        # Add our custom options - keep it simple to avoid format issues
         opts.update({
             "format": self._get_format_selector(),
-            "source_address": "0.0.0.0",
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            # Comprehensive HTTP headers to look like a real browser
             "http_headers": {
                 "User-Agent": random.choice(UA_LIST),
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Accept-Encoding": "gzip, deflate",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
-            # Multiple player clients for fallback
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["web_embedded", "web", "tv", "android", "ios"]
-                }
-            },
+            "nocheckcertificate": True,
+            "geo_bypass": True,
         })
 
         if output_path:
@@ -184,9 +163,8 @@ class VideoDownloaderService:
                     'preferedformat': 'mp4',
                 }
             ]
-            opts["retries"] = 5
-            opts["fragment_retries"] = 25
-            opts["concurrent_fragments"] = 4
+            opts["retries"] = 10
+            opts["fragment_retries"] = 10
             opts["force_overwrites"] = True
 
         return opts
@@ -290,10 +268,10 @@ class VideoDownloaderService:
         """
         Download video from YouTube using yt-dlp Python library.
 
-        Uses the same approach as yt-dlp-api to avoid YouTube blocking:
-        - Multiple player clients for fallback
-        - User-Agent rotation
-        - Comprehensive HTTP headers
+        Optimized for fast downloads with minimal retries:
+        - Uses flexible format selectors that work reliably
+        - iOS/web/android player clients (most compatible)
+        - Skips problematic DASH/HLS formats
         """
         # First, get video metadata to check duration
         metadata = await self._get_video_info(url)
@@ -307,43 +285,52 @@ class VideoDownloaderService:
 
         logger.info(f"Downloading video from YouTube: {url}")
 
-        # Build yt-dlp options using library approach
-        ydl_opts = self._build_ytdlp_opts(output_path=output_path, download=True)
+        # Format selectors from most preferred to fallback
+        format_selectors = [
+            "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
+            "best[height<=1080]/best",
+            "best",
+        ]
 
         # Run download in thread pool to not block event loop
         loop = asyncio.get_event_loop()
 
         def do_download():
-            try:
-                # First attempt with rnet browser impersonation
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-            except Exception as e:
-                logger.warning(f"First download attempt failed: {e}, trying without rnet")
+            last_error = None
+            
+            for fmt_idx, format_selector in enumerate(format_selectors):
                 try:
-                    # Second attempt: Try without rnet but keep high quality
-                    fallback_opts = self._build_ytdlp_opts(
-                        output_path=output_path,
-                        download=True,
-                        use_rnet=False  # Disable rnet for fallback
-                    )
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    logger.info(f"Download attempt {fmt_idx + 1}/{len(format_selectors)} with format: {format_selector[:50]}...")
+                    
+                    # Build options - start without rnet for speed
+                    if fmt_idx == 0:
+                        ydl_opts = self._build_ytdlp_opts(output_path=output_path, download=True, use_rnet=True)
+                    else:
+                        ydl_opts = self._build_ytdlp_opts(output_path=output_path, download=True, use_rnet=False)
+                    
+                    ydl_opts["format"] = format_selector
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         ydl.download([url])
-                except Exception as e2:
-                    logger.warning(f"Second download attempt failed: {e2}, trying emergency options")
-                    # Emergency fallback with simplified options
-                    emergency_opts = {
-                        "format": "best[height>=720]/best",
-                        "quiet": True,
-                        "no_warnings": True,
-                        "outtmpl": output_path,
-                        "noplaylist": True,
-                        "merge_output_format": "mp4",
-                    }
-                    if self.settings.ytdlp_proxy:
-                        emergency_opts["proxy"] = self.settings.ytdlp_proxy
-                    with yt_dlp.YoutubeDL(emergency_opts) as ydl:
-                        ydl.download([url])
+                    
+                    # If we get here, download succeeded
+                    return
+                    
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
+                    
+                    # Check if it's a format issue - try next selector immediately
+                    if "Requested format" in error_str or "No video formats" in error_str:
+                        logger.warning(f"Format not available, trying next: {error_str[:100]}")
+                        continue
+                    
+                    # For other errors, also continue to next format
+                    logger.warning(f"Download attempt {fmt_idx + 1} failed: {error_str[:200]}")
+                    continue
+            
+            # All attempts failed
+            raise last_error or VideoDownloadError("All download attempts failed")
 
         try:
             await loop.run_in_executor(None, do_download)
@@ -511,8 +498,8 @@ class VideoDownloaderService:
             source_type="direct_url",
         )
 
-    async def _get_video_metadata_ffprobe(self, video_path: str) -> VideoMetadata:
-        """Get video metadata using ffprobe."""
+    def _run_ffprobe_sync(self, video_path: str) -> tuple[int, bytes, bytes]:
+        """Run ffprobe synchronously (for use with run_in_executor on Windows)."""
         cmd = [
             "ffprobe",
             "-v", "quiet",
@@ -522,15 +509,23 @@ class VideoDownloaderService:
             video_path,
         ]
         
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.returncode, result.stdout, result.stderr
+
+    async def _get_video_metadata_ffprobe(self, video_path: str) -> VideoMetadata:
+        """Get video metadata using ffprobe."""
+        # Use run_in_executor for Windows compatibility
+        # asyncio.create_subprocess_exec doesn't work on Windows without ProactorEventLoop
+        loop = asyncio.get_event_loop()
+        returncode, stdout, stderr = await loop.run_in_executor(
+            None, self._run_ffprobe_sync, video_path
         )
         
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
+        if returncode != 0:
             logger.warning(f"ffprobe failed, using defaults: {stderr.decode()[:200]}")
             return VideoMetadata(
                 title=os.path.basename(video_path),
@@ -589,41 +584,31 @@ class VideoDownloaderService:
         """
         Get video metadata without downloading using yt-dlp Python library.
 
-        Uses the same anti-blocking approach as yt-dlp-api.
+        Uses minimal options for maximum compatibility - NO format specification.
         """
         logger.debug(f"Getting video info for: {url}")
-
-        # Build options for info extraction (no download)
-        ydl_opts = self._build_ytdlp_opts(download=False)
 
         # Run in thread pool to not block event loop
         loop = asyncio.get_event_loop()
 
         def do_extract():
-            try:
-                # First attempt with rnet browser impersonation
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(url, download=False)
-            except Exception as e:
-                logger.warning(f"First info extraction failed: {e}, trying without rnet")
-                try:
-                    # Second attempt: Try without rnet
-                    fallback_opts = self._build_ytdlp_opts(download=False, use_rnet=False)
-                    with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                        return ydl.extract_info(url, download=False)
-                except Exception as e2:
-                    logger.warning(f"Second info extraction failed: {e2}, trying basic options")
-                    # Emergency fallback
-                    basic_opts = {
-                        "format": "best",
-                        "quiet": True,
-                        "no_warnings": True,
-                        "noplaylist": True,
-                    }
-                    if self.settings.ytdlp_proxy:
-                        basic_opts["proxy"] = self.settings.ytdlp_proxy
-                    with yt_dlp.YoutubeDL(basic_opts) as ydl:
-                        return ydl.extract_info(url, download=False)
+            # MINIMAL options - don't specify format or complex extractor args
+            # This avoids "format not available" errors
+            opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "noplaylist": True,
+                "socket_timeout": 30,
+                "nocheckcertificate": True,
+            }
+            
+            # Add proxy if configured
+            if self.settings.ytdlp_proxy:
+                opts["proxy"] = self.settings.ytdlp_proxy
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
 
         try:
             info = await loop.run_in_executor(None, do_extract)

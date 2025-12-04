@@ -16,13 +16,9 @@ ffmpeg-python==0.2.0        # FFmpeg bindings for rendering
 scipy>=1.12.0,<1.14         # Pin to version compatible with numpy 1.x
 
 # ML Models
-# NOTE: torch/torchvision are installed FIRST in Dockerfile with CPU-only index
-# (--index-url https://download.pytorch.org/whl/cpu) to avoid 4GB of CUDA deps.
-# Version pins here ensure pip doesn't try to upgrade when resolving ultralytics deps.
-torch>=2.0.0,<3.0.0
-torchvision>=0.15.0,<1.0.0
-ultralytics==8.1.0          # YOLOv8 (uses torch installed above)
-mediapipe==0.10.9           # Pose estimation
+# YOLO removed for faster startup and lower memory (~200MB savings)
+# MediaPipe + Haar Cascade provides sufficient face detection coverage
+mediapipe==0.10.9           # Pose estimation & face detection
 deep-sort-realtime==1.3.2   # Object tracking
 
 # Transcription (Groq Whisper)

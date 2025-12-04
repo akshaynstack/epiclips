@@ -35,12 +35,18 @@ class CaptionStyle:
 
 class LayoutType:
     """
-    Available layout type identifiers for clip rendering.
+    Layout type identifiers for clip rendering.
 
-    Users can select from these layouts to control how clips are composed.
+    NOTE: Layout selection is now always automatic. The AI analyzes each frame
+    and dynamically switches between layouts mid-clip for optimal framing.
+
+    SPLIT_SCREEN and TALKING_HEAD are kept for internal use by the SmartLayoutDetector
+    but are no longer exposed as user-selectable options.
     """
-    SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (50/50 split)
-    TALKING_HEAD = "talking_head"    # Face-focused single crop that follows the speaker
+    AUTO = "auto"                    # AI-powered dynamic layout detection - always used
+    # Internal layout types detected by SmartLayoutDetector:
+    SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (detected automatically)
+    TALKING_HEAD = "talking_head"    # Face-focused single crop (detected automatically)
 
 
 def get_layout_preset(layout_id: str) -> dict:
@@ -57,6 +63,16 @@ def get_layout_preset(layout_id: str) -> dict:
         ValueError: If layout_id is not recognized
     """
     presets = {
+        LayoutType.AUTO: {
+            "id": LayoutType.AUTO,
+            "name": "Auto (Recommended)",
+            "description": "AI detects layout changes and switches dynamically mid-clip - best for mixed content",
+            "screen_ratio": 0.50,  # Used when screen_share detected
+            "face_ratio": 0.50,    # Used when screen_share detected
+            "requires_face": False,
+            "requires_screen": False,
+            "dynamic": True,  # Indicates this uses SmartLayoutDetector
+        },
         LayoutType.SPLIT_SCREEN: {
             "id": LayoutType.SPLIT_SCREEN,
             "name": "Split Screen",
@@ -86,25 +102,21 @@ def get_layout_preset(layout_id: str) -> dict:
 
 def get_available_layouts() -> list[dict]:
     """
-    Get list of available layout presets with metadata.
+    DEPRECATED: Get list of available layout presets.
+
+    Layout selection is now always automatic. This function only returns
+    the auto preset for backward compatibility with older clients.
 
     Returns:
-        List of layout info dicts with id, name, description, and preview info
+        List containing only the auto layout preset
     """
     return [
         {
-            "id": LayoutType.SPLIT_SCREEN,
-            "name": "Split Screen",
-            "description": "Screen content on top, face close-up on bottom - optimal for tutorials and screen recordings",
-            "icon": "layout-grid",  # lucide icon name for frontend
-            "preview_layout": {"top": "screen", "bottom": "face"},
-        },
-        {
-            "id": LayoutType.TALKING_HEAD,
-            "name": "Talking Head",
-            "description": "Dynamic face-focused crop that follows the speaker - perfect for podcasts and vlogs",
-            "icon": "user",
-            "preview_layout": {"full": "face"},
+            "id": LayoutType.AUTO,
+            "name": "Automatic",
+            "description": "AI automatically detects and switches between layouts for optimal framing",
+            "icon": "sparkles",
+            "preview_layout": {"dynamic": True, "description": "AI-powered scene detection"},
         },
     ]
 
@@ -324,18 +336,13 @@ class Settings(BaseSettings):
     # yt-dlp Configuration
     ytdlp_proxy: Optional[str] = None  # Proxy URL (e.g., http://user:pass@host:port)
 
+    # Performance tuning (configurable for ECS scaling)
+    max_workers: int = 4  # Max concurrent jobs (set to vCPU count for optimal performance)
+    max_render_workers: int = 3  # Max concurrent FFmpeg render processes
+
     # ============================================================
     # HARDCODED SETTINGS (not configurable via env vars)
     # ============================================================
-
-    # Model paths
-    @property
-    def yolo_model_path(self) -> str:
-        return "/app/models/yolov8n.pt"
-
-    @property
-    def yolo_model_name(self) -> str:
-        return "yolov8n.pt"
 
     # Processing settings
     @property
@@ -344,7 +351,11 @@ class Settings(BaseSettings):
 
     @property
     def max_concurrent_jobs(self) -> int:
-        return 2
+        return self.max_workers  # Use configurable env var
+
+    @property
+    def max_concurrent_renders(self) -> int:
+        return self.max_render_workers  # Use configurable env var
 
     @property
     def temp_directory(self) -> str:

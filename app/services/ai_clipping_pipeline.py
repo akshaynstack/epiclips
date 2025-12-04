@@ -5,9 +5,9 @@ This service orchestrates the entire AI clipping pipeline:
 1. Video download (YouTube via yt-dlp)
 2. Audio extraction and transcription (Groq Whisper)
 3. Intelligence planning (Gemini via OpenRouter)
-4. Detection analysis (local YOLO/MediaPipe)
-5. Clip rendering (FFmpeg with captions)
-6. S3 upload
+4. Detection analysis (local MediaPipe with parallel processing)
+5. Clip rendering (FFmpeg with captions - parallel execution)
+6. S3 upload (parallel uploads)
 """
 
 import asyncio
@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -34,6 +35,7 @@ from app.services.rendering_service import (
     CropKeyframe,
     CropTimeline,
     RenderRequest,
+    RenderResult,
     RenderingService,
 )
 from app.services.s3_upload_service import (
@@ -52,6 +54,11 @@ from app.services.video_downloader import (
 from app.services.content_region_detector import (
     ContentRegionDetector,
     FrameAnalysis,
+)
+from app.services.smart_layout_detector import (
+    SmartLayoutDetector,
+    LayoutAnalysis,
+    LayoutSegment,
 )
 from app.services.webhook_service import (
     WebhookService,
@@ -153,6 +160,7 @@ class AIClippingPipeline:
         self.rendering_service = RenderingService()
         self.s3_upload_service = S3UploadService()
         self.content_region_detector = ContentRegionDetector()
+        self.smart_layout_detector = SmartLayoutDetector()
 
         # Current request context for webhooks (set during process_video)
         self._current_callback_url: Optional[str] = None
@@ -247,82 +255,147 @@ class AIClippingPipeline:
                 clip_segments=clip_plan.segments,
                 source_width=download_result.metadata.width,
                 source_height=download_result.metadata.height,
+                layout_type=request.layout_type,  # Pass user's layout choice (auto, split_screen, talking_head)
             )
             logger.info("Detection analysis complete")
             
-            # Step 5: Render clips
+            # Step 5: Render clips IN PARALLEL
             clips_dir = os.path.join(work_dir, "clips")
             os.makedirs(clips_dir, exist_ok=True)
             
-            rendered_clips: list[tuple[str, ClipPlanSegment]] = []
             total_clips = len(clip_plan.segments)
+            self._update_progress(
+                job_id, JobStatus.RENDERING, 50,
+                f"Rendering {total_clips} clips in parallel...",
+                clips_completed=0, total_clips=total_clips,
+            )
             
-            for i, segment in enumerate(clip_plan.segments):
-                progress = 50 + (35 * i / total_clips)
-                self._update_progress(
-                    job_id, JobStatus.RENDERING, progress,
-                    f"Rendering clip {i + 1}/{total_clips}...",
-                    clips_completed=i, total_clips=total_clips,
-                )
-                
-                output_path = os.path.join(clips_dir, f"clip_{i:02d}.mp4")
-                
-                # Get detection results for this clip's timeframe
-                crop_timeline = self._build_crop_timeline(
-                    detection_results.get(i),
-                    segment,
-                    download_result.metadata.width,
-                    download_result.metadata.height,
-                )
-                
-                # For screen_share layout, also build the screen timeline
-                screen_timeline = None
-                if segment.layout_type == "screen_share":
-                    screen_timeline = self._build_screen_timeline(
-                        segment,
-                        download_result.metadata.width,
-                        download_result.metadata.height,
-                        detection_results.get(i),  # Pass detection frames for webcam detection
+            # Prepare render tasks for parallel execution
+            # Limit concurrent FFmpeg processes to avoid memory exhaustion
+            render_semaphore = asyncio.Semaphore(self.settings.max_concurrent_renders)  # Configurable via MAX_RENDER_WORKERS
+            
+            async def render_single_clip(i: int, segment: ClipPlanSegment) -> tuple[int, str, ClipPlanSegment]:
+                """Render a single clip with semaphore-based concurrency control."""
+                async with render_semaphore:
+                    output_path = os.path.join(clips_dir, f"clip_{i:02d}.mp4")
+                    
+                    # Get detection results and layout analysis for this clip
+                    clip_data = detection_results.get(i, {})
+                    detection_frames = clip_data.get('detection_frames', [])
+                    layout_analysis: Optional[LayoutAnalysis] = clip_data.get('layout_analysis')
+                    
+                    # Get transcript segments for this clip
+                    clip_transcript = self._filter_transcript_for_clip(
+                        transcription_result.segments,
+                        segment.start_time_ms,
+                        segment.end_time_ms,
                     )
-                    logger.info(f"Screen share layout: face timeline={crop_timeline is not None}, screen timeline={screen_timeline is not None}")
-                
-                # Get transcript segments for this clip
-                clip_transcript = self._filter_transcript_for_clip(
-                    transcription_result.segments,
-                    segment.start_time_ms,
-                    segment.end_time_ms,
-                )
-                
-                # Build render request
-                render_request = RenderRequest(
-                    video_path=download_result.video_path,
-                    output_path=output_path,
-                    start_time_ms=segment.start_time_ms,
-                    end_time_ms=segment.end_time_ms,
-                    source_width=download_result.metadata.width,
-                    source_height=download_result.metadata.height,
-                    layout_type=segment.layout_type,
-                    primary_timeline=crop_timeline,  # Face tracking for both layouts
-                    secondary_timeline=screen_timeline,  # Screen crop for screen_share only
-                    transcript_segments=clip_transcript if request.include_captions else None,
-                    caption_style=request.caption_style,
-                )
-                
-                render_result = await self.rendering_service.render_clip(render_request)
-                rendered_clips.append((render_result.output_path, segment))
-                
-                logger.info(f"Rendered clip {i + 1}: {render_result.file_size_bytes / 1024 / 1024:.1f} MB")
+                    
+                    # Check if clip has layout transitions - use segment-based rendering
+                    if layout_analysis and layout_analysis.has_transitions and len(layout_analysis.layout_segments) > 1:
+                        logger.info(
+                            f"Clip {i + 1} has {len(layout_analysis.layout_segments)} layout segments - "
+                            f"using segment-based rendering"
+                        )
+                        
+                        render_result = await self._render_with_layout_transitions(
+                            video_path=download_result.video_path,
+                            segment=segment,
+                            layout_segments=layout_analysis.layout_segments,
+                            detection_frames=detection_frames,
+                            transcript_segments=clip_transcript if request.include_captions else None,
+                            output_path=output_path,
+                            source_width=download_result.metadata.width,
+                            source_height=download_result.metadata.height,
+                            caption_style=request.caption_style,
+                        )
+                    else:
+                        # Single layout - use standard rendering
+                        effective_layout = segment.layout_type
+                        if layout_analysis and layout_analysis.layout_segments:
+                            effective_layout = layout_analysis.layout_segments[0].layout_type
+                        
+                        crop_timeline = self._build_crop_timeline(
+                            detection_frames,
+                            segment,
+                            download_result.metadata.width,
+                            download_result.metadata.height,
+                            effective_layout=effective_layout,  # Pass actual layout from smart detector
+                        )
+                        
+                        screen_timeline = None
+                        if effective_layout == "screen_share":
+                            screen_timeline = self._build_screen_timeline(
+                                segment,
+                                download_result.metadata.width,
+                                download_result.metadata.height,
+                                detection_frames,
+                            )
+                        
+                        # Adjust caption position based on layout type:
+                        # - talking_head: bottom (natural look)
+                        # - screen_share: center (between screen and face)
+                        adjusted_caption_style = None
+                        if request.caption_style:
+                            adjusted_caption_style = CaptionStyle()
+                            adjusted_caption_style.font_name = request.caption_style.font_name
+                            adjusted_caption_style.font_size = request.caption_style.font_size
+                            adjusted_caption_style.primary_color = request.caption_style.primary_color
+                            adjusted_caption_style.highlight_color = request.caption_style.highlight_color
+                            adjusted_caption_style.outline_color = request.caption_style.outline_color
+                            adjusted_caption_style.outline_width = request.caption_style.outline_width
+                            adjusted_caption_style.max_words_per_line = request.caption_style.max_words_per_line
+                            adjusted_caption_style.word_by_word_highlight = request.caption_style.word_by_word_highlight
+                            adjusted_caption_style.alignment = request.caption_style.alignment
+                            adjusted_caption_style.bold = request.caption_style.bold
+                            adjusted_caption_style.uppercase = request.caption_style.uppercase
+                            
+                            if effective_layout == "talking_head":
+                                adjusted_caption_style.position = "bottom"
+                            else:  # screen_share
+                                adjusted_caption_style.position = "center"
+                        
+                        render_request = RenderRequest(
+                            video_path=download_result.video_path,
+                            output_path=output_path,
+                            start_time_ms=segment.start_time_ms,
+                            end_time_ms=segment.end_time_ms,
+                            source_width=download_result.metadata.width,
+                            source_height=download_result.metadata.height,
+                            layout_type=effective_layout,
+                            primary_timeline=crop_timeline,
+                            secondary_timeline=screen_timeline,
+                            transcript_segments=clip_transcript if request.include_captions else None,
+                            caption_style=adjusted_caption_style,
+                        )
+                        
+                        render_result = await self.rendering_service.render_clip(render_request)
+                    
+                    logger.info(f"Rendered clip {i + 1}: {render_result.file_size_bytes / 1024 / 1024:.1f} MB")
+                    return (i, render_result.output_path, segment)
             
-            # Step 6: Upload clips to S3
+            # Execute all render tasks in parallel
+            render_tasks = [
+                render_single_clip(i, segment)
+                for i, segment in enumerate(clip_plan.segments)
+            ]
+            render_results = await asyncio.gather(*render_tasks)
+            
+            # Sort by index to maintain order
+            render_results.sort(key=lambda x: x[0])
+            rendered_clips = [(path, segment) for _, path, segment in render_results]
+            
+            logger.info(f"All {len(rendered_clips)} clips rendered in parallel")
+            
+            # Step 6: Upload clips to S3 IN PARALLEL
             self._update_progress(
                 job_id, JobStatus.UPLOADING, 90,
                 "Uploading clips to storage...",
                 clips_completed=total_clips, total_clips=total_clips,
             )
             
-            clip_artifacts: list[ClipArtifact] = []
-            
-            for i, (clip_path, segment) in enumerate(rendered_clips):
+            async def upload_single_clip(i: int, clip_path: str, segment: ClipPlanSegment) -> ClipArtifact:
+                """Upload a single clip to S3."""
                 upload_result = await self.s3_upload_service.upload_clip(
                     local_path=clip_path,
                     job_id=job_id,
@@ -336,7 +409,7 @@ class AIClippingPipeline:
                     },
                 )
                 
-                clip_artifacts.append(ClipArtifact(
+                return ClipArtifact(
                     clip_index=i,
                     s3_url=upload_result.s3_url,
                     duration_ms=segment.end_time_ms - segment.start_time_ms,
@@ -346,7 +419,19 @@ class AIClippingPipeline:
                     layout_type=segment.layout_type,
                     summary=segment.summary,
                     tags=segment.tags or [],
-                ))
+                )
+            
+            # Execute all upload tasks in parallel
+            upload_tasks = [
+                upload_single_clip(i, clip_path, segment)
+                for i, (clip_path, segment) in enumerate(rendered_clips)
+            ]
+            clip_artifacts = await asyncio.gather(*upload_tasks)
+            
+            # Sort by clip index to maintain order
+            clip_artifacts = sorted(clip_artifacts, key=lambda x: x.clip_index)
+            
+            logger.info(f"All {len(clip_artifacts)} clips uploaded in parallel")
             
             # Create job output
             processing_time = time.time() - start_time
@@ -438,19 +523,37 @@ class AIClippingPipeline:
         clip_segments: list[ClipPlanSegment],
         source_width: int,
         source_height: int,
-    ) -> dict[int, list[dict]]:
+        layout_type: str = "auto",
+    ) -> dict[int, dict]:
         """
-        Run detection pipeline for each planned clip segment.
-        
-        Returns a mapping of clip_index -> detection frames.
-        
+        Run detection pipeline and layout analysis for each planned clip segment IN PARALLEL.
+
+        Returns a mapping of clip_index -> {
+            'detection_frames': list of face detection frames,
+            'layout_analysis': LayoutAnalysis with segments and transitions
+        }
+
+        Args:
+            video_path: Path to video file
+            clip_segments: List of planned clip segments
+            source_width: Source video width
+            source_height: Source video height
+            layout_type: User-requested layout type:
+                - "auto": Run SmartLayoutDetector to detect transitions
+                - "split_screen"/"talking_head": Force this layout, skip transition detection
+
         Note: Detection is run for ALL layout types to enable smart cropping:
         - talking_head: Uses face detection for dynamic panning
         - screen_share: Uses face detection for the face portion of stack layout
+
+        Layout analysis enables dynamic layout switching within clips by:
+        - Detecting layout transitions (talking_head <-> screen_share)
+        - Creating layout segments for per-segment rendering
         """
-        results = {}
+        use_auto_layout = layout_type == "auto"
         
-        for i, segment in enumerate(clip_segments):
+        async def process_single_clip(i: int, segment: ClipPlanSegment) -> tuple[int, dict]:
+            """Process detection for a single clip segment."""
             try:
                 # Run detection for ALL clips (both talking_head and screen_share need face detection)
                 detection_result = await self.detection_pipeline.process_video(
@@ -459,13 +562,85 @@ class AIClippingPipeline:
                     end_time_ms=segment.end_time_ms,
                     frame_interval_seconds=0.5,  # 2 FPS for detection
                 )
-                
-                results[i] = detection_result.get("frames", [])
-                logger.info(f"Detection for clip {i} ({segment.layout_type}): {len(results[i])} frames")
-                
+
+                detection_frames = detection_result.get("frames", [])
+                logger.info(f"Detection for clip {i} ({segment.layout_type}): {len(detection_frames)} frames")
+
+                if use_auto_layout:
+                    # AUTO mode: Run SmartLayoutDetector to detect transitions within the clip
+                    layout_analysis = await self.smart_layout_detector.analyze_clip_layout(
+                        video_path=video_path,
+                        start_ms=segment.start_time_ms,
+                        end_ms=segment.end_time_ms,
+                        face_detections=detection_frames,
+                        sample_fps=2.0,  # Sample at 2 FPS for layout analysis
+                    )
+
+                    logger.info(
+                        f"Layout analysis for clip {i}: "
+                        f"has_transitions={layout_analysis.has_transitions}, "
+                        f"segments={layout_analysis.segment_count}, "
+                        f"dominant={layout_analysis.dominant_layout}"
+                    )
+                else:
+                    # EXPLICIT mode: User specified a layout, force it for entire clip
+                    # Map split_screen -> screen_share for rendering compatibility
+                    forced_layout = "screen_share" if layout_type == "split_screen" else layout_type
+
+                    layout_analysis = LayoutAnalysis(
+                        has_transitions=False,
+                        dominant_layout=forced_layout,
+                        layout_segments=[
+                            LayoutSegment(
+                                start_ms=segment.start_time_ms,
+                                end_ms=segment.end_time_ms,
+                                layout_type=forced_layout,
+                                confidence=1.0,  # User explicitly chose this
+                            )
+                        ],
+                    )
+                    logger.info(
+                        f"Using forced layout '{forced_layout}' for clip {i} (user selected: {layout_type})"
+                    )
+
+                return (i, {
+                    'detection_frames': detection_frames,
+                    'layout_analysis': layout_analysis,
+                })
+
             except Exception as e:
-                logger.warning(f"Detection failed for clip {i}: {e}")
-                results[i] = []
+                logger.warning(f"Detection/layout analysis failed for clip {i}: {e}")
+                # Fallback: no transitions, use planned layout or forced layout
+                fallback_layout = segment.layout_type
+                if not use_auto_layout:
+                    fallback_layout = "screen_share" if layout_type == "split_screen" else layout_type
+
+                return (i, {
+                    'detection_frames': [],
+                    'layout_analysis': LayoutAnalysis(
+                        has_transitions=False,
+                        dominant_layout=fallback_layout,
+                        layout_segments=[
+                            LayoutSegment(
+                                start_ms=segment.start_time_ms,
+                                end_ms=segment.end_time_ms,
+                                layout_type=fallback_layout,
+                                confidence=0.5,
+                            )
+                        ],
+                    ),
+                })
+        
+        # Run all detection tasks in parallel
+        detection_tasks = [
+            process_single_clip(i, segment)
+            for i, segment in enumerate(clip_segments)
+        ]
+        detection_results_list = await asyncio.gather(*detection_tasks)
+        
+        # Convert to dict
+        results = {i: data for i, data in detection_results_list}
+        logger.info(f"Completed parallel detection for {len(results)} clips")
         
         return results
 
@@ -475,6 +650,7 @@ class AIClippingPipeline:
         segment: ClipPlanSegment,
         source_width: int,
         source_height: int,
+        effective_layout: Optional[str] = None,
     ) -> Optional[CropTimeline]:
         """
         Build a crop timeline from detection results for face tracking.
@@ -483,9 +659,15 @@ class AIClippingPipeline:
         - For talking_head: Full 9:16 crop window following face
         - For screen_share: Tight crop around face for bottom region
         - Simple fallback to center-bottom when no faces detected
+        
+        Args:
+            effective_layout: Override layout type from smart detector (takes priority over segment.layout_type)
         """
+        # Use effective_layout from smart detector if provided, otherwise fallback to segment's layout
+        layout_type = effective_layout if effective_layout else segment.layout_type
+        
         # Calculate crop window based on layout type
-        if segment.layout_type == "screen_share":
+        if layout_type == "screen_share":
             # For screen_share: tight crop around face for close-up effect
             face_output_height = int(self.settings.target_output_height * self.settings.split_face_ratio)
             face_crop_aspect = self.settings.target_output_width / face_output_height
@@ -538,6 +720,7 @@ class AIClippingPipeline:
             else:
                 window_width = source_width
                 window_height = int(source_width / target_aspect)
+            logger.info(f"Talking head crop: {window_width}x{window_height} (9:16 from {source_width}x{source_height})")
         
         frame_area = source_width * source_height
         
@@ -561,12 +744,21 @@ class AIClippingPipeline:
                     face_w = bbox.get("width", 0)
                     face_h = bbox.get("height", 0)
                     face_area = face_w * face_h
-                    
+
                     # Skip very small faces (likely false positives)
+                    # For screen_share layouts, use a much lower threshold since
+                    # webcam faces in corners are typically small (< 5% of frame)
                     area_ratio = face_area / frame_area if frame_area > 0 else 0
-                    if area_ratio < 0.005 or area_ratio > 0.30:
-                        continue
-                    
+                    if layout_type == "screen_share":
+                        # Screen share: accept smaller faces (webcams in corners)
+                        # Minimum: 0.1% of frame, Maximum: 20% (if larger, it's talking_head)
+                        if area_ratio < 0.001 or area_ratio > 0.20:
+                            continue
+                    else:
+                        # Talking head: faces should be prominent
+                        if area_ratio < 0.005 or area_ratio > 0.30:
+                            continue
+
                     # Weight = confidence × area (multiplicative weighting)
                     weight = confidence * face_area
                     
@@ -596,35 +788,44 @@ class AIClippingPipeline:
                         _, last_x, last_y = raw_positions[-1]
                         raw_positions.append((timestamp_ms, last_x, last_y))
                     else:
-                        # Fallback: center-bottom
-                        center_x = source_width // 2
-                        if segment.layout_type == "screen_share":
-                            center_y = int(source_height * 0.75)  # Center-bottom area
+                        # Fallback position based on layout type
+                        if layout_type == "screen_share":
+                            # Webcams are typically in corners - default to bottom-right
+                            # (most common webcam position)
+                            center_x = int(source_width * 0.85)  # Right side
+                            center_y = int(source_height * 0.85)  # Bottom
+                            logger.warning(f"No faces found for screen_share - using bottom-right fallback")
                         else:
+                            center_x = source_width // 2
                             center_y = int(source_height * 0.4)
                         raw_positions.append((timestamp_ms, center_x, center_y))
             else:
-                # No face detected - use previous position or center-bottom fallback
+                # No face detected - use previous position or corner fallback
                 if raw_positions:
                     # Use last known position for continuity
                     _, last_x, last_y = raw_positions[-1]
                     raw_positions.append((timestamp_ms, last_x, last_y))
                 else:
-                    # Fallback: center-bottom
-                    center_x = source_width // 2
-                    if segment.layout_type == "screen_share":
-                        center_y = int(source_height * 0.75)  # Center-bottom
+                    # Fallback position based on layout type
+                    if layout_type == "screen_share":
+                        # Webcams are typically in corners - default to bottom-right
+                        center_x = int(source_width * 0.85)  # Right side
+                        center_y = int(source_height * 0.85)  # Bottom
+                        logger.warning(f"No faces detected for screen_share - using bottom-right fallback")
                     else:
+                        center_x = source_width // 2
                         center_y = int(source_height * 0.4)  # Upper center for talking head
                     raw_positions.append((timestamp_ms, center_x, center_y))
         
         if not raw_positions:
             # Should not happen given the logic above, but safe fallback
-            # Use center-bottom for screen_share, centered for others
-            center_x = source_width // 2
-            if segment.layout_type == "screen_share":
-                center_y = int(source_height * 0.75)
+            if layout_type == "screen_share":
+                # Webcams are typically in corners - default to bottom-right
+                center_x = int(source_width * 0.85)
+                center_y = int(source_height * 0.85)
+                logger.warning(f"Empty positions for screen_share - using bottom-right fallback")
             else:
+                center_x = source_width // 2
                 center_y = source_height // 2
             raw_positions = [(segment.start_time_ms, center_x, center_y)]
         
@@ -694,14 +895,15 @@ class AIClippingPipeline:
     def _smooth_positions(
         self,
         positions: list[tuple[int, int, int]],
-        window_size: int = 3,
+        window_size: int = 5,
     ) -> list[tuple[int, int, int]]:
         """
         Apply moving average smoothing to reduce camera jitter.
+        Uses weighted average with higher weight for center frames.
         
         Args:
             positions: List of (timestamp_ms, center_x, center_y)
-            window_size: Number of frames to average
+            window_size: Number of frames to average (should be odd)
             
         Returns:
             Smoothed positions
@@ -712,17 +914,37 @@ class AIClippingPipeline:
         smoothed = []
         half_window = window_size // 2
         
+        # Generate gaussian-like weights for smoother blending
+        weights = []
+        for j in range(-half_window, half_window + 1):
+            # Simple triangular weighting (center has highest weight)
+            weight = half_window + 1 - abs(j)
+            weights.append(weight)
+        
         for i, (ts, _, _) in enumerate(positions):
             # Get window of positions
             start_idx = max(0, i - half_window)
             end_idx = min(len(positions), i + half_window + 1)
             
-            # Calculate average position
-            window_x = [positions[j][1] for j in range(start_idx, end_idx)]
-            window_y = [positions[j][2] for j in range(start_idx, end_idx)]
+            # Calculate weighted average position
+            total_weight = 0.0
+            weighted_x = 0.0
+            weighted_y = 0.0
             
-            avg_x = int(sum(window_x) / len(window_x))
-            avg_y = int(sum(window_y) / len(window_y))
+            for j, idx in enumerate(range(start_idx, end_idx)):
+                # Adjust weight index based on actual window position
+                weight_idx = j + (half_window - (i - start_idx))
+                if 0 <= weight_idx < len(weights):
+                    w = weights[weight_idx]
+                else:
+                    w = 1
+                
+                weighted_x += positions[idx][1] * w
+                weighted_y += positions[idx][2] * w
+                total_weight += w
+            
+            avg_x = int(weighted_x / total_weight) if total_weight > 0 else positions[i][1]
+            avg_y = int(weighted_y / total_weight) if total_weight > 0 else positions[i][2]
             
             smoothed.append((ts, avg_x, avg_y))
         
@@ -805,6 +1027,359 @@ class AIClippingPipeline:
             ],
         )
 
+    async def _render_with_layout_transitions(
+        self,
+        video_path: str,
+        segment: ClipPlanSegment,
+        layout_segments: list[LayoutSegment],
+        detection_frames: list[dict],
+        transcript_segments: Optional[list],
+        output_path: str,
+        source_width: int,
+        source_height: int,
+        caption_style: Optional[CaptionStyle] = None,
+    ) -> RenderResult:
+        """
+        Render a clip with multiple layout segments and stitch them together.
+
+        This method handles dynamic layout switching by:
+        1. Rendering each layout segment separately with its appropriate layout
+        2. Concatenating all segments using FFmpeg
+        3. Adding captions to the final merged video
+
+        Args:
+            video_path: Path to source video
+            segment: Original clip plan segment (for metadata)
+            layout_segments: List of LayoutSegment with start/end times and layout types
+            detection_frames: Face detection frames for crop timeline building
+            transcript_segments: Transcript for captions (applied to final output)
+            output_path: Final output path
+            source_width: Source video width
+            source_height: Source video height
+            caption_style: Caption styling options
+
+        Returns:
+            RenderResult with final output path and metadata
+        """
+        from pathlib import Path
+
+        temp_dir = Path(output_path).parent / f"segments_{segment.start_time_ms}"
+        temp_dir.mkdir(exist_ok=True)
+        segment_files: list[Path] = []
+
+        try:
+            logger.info(
+                f"Rendering {len(layout_segments)} layout segments for clip "
+                f"{segment.start_time_ms}ms - {segment.end_time_ms}ms"
+            )
+
+            for i, layout_seg in enumerate(layout_segments):
+                segment_output = temp_dir / f"segment_{i:03d}.mp4"
+
+                logger.debug(
+                    f"Rendering segment {i + 1}/{len(layout_segments)}: "
+                    f"{layout_seg.start_ms}ms - {layout_seg.end_ms}ms ({layout_seg.layout_type})"
+                )
+
+                # Filter detection frames for this segment's time range
+                seg_detection_frames = self._filter_detection_frames_for_segment(
+                    detection_frames, layout_seg.start_ms, layout_seg.end_ms
+                )
+
+                # Create a temporary segment for crop timeline building
+                temp_segment = ClipPlanSegment(
+                    start_time_ms=layout_seg.start_ms,
+                    end_time_ms=layout_seg.end_ms,
+                    layout_type=layout_seg.layout_type,
+                    virality_score=segment.virality_score,
+                    summary=segment.summary,
+                    tags=segment.tags,
+                )
+
+                # Build crop timeline for this segment
+                crop_timeline = self._build_crop_timeline(
+                    seg_detection_frames,
+                    temp_segment,
+                    source_width,
+                    source_height,
+                )
+
+                # For screen_share layout, build screen timeline
+                screen_timeline = None
+                if layout_seg.layout_type == "screen_share":
+                    screen_timeline = self._build_screen_timeline(
+                        temp_segment,
+                        source_width,
+                        source_height,
+                        seg_detection_frames,
+                    )
+
+                # Filter transcript segments for this layout segment's time range
+                seg_transcript = None
+                seg_caption_style = None
+                if transcript_segments:
+                    seg_transcript = [
+                        ts for ts in transcript_segments
+                        if ts.start_time_ms < layout_seg.end_ms and ts.end_time_ms > layout_seg.start_ms
+                    ]
+                    if seg_transcript and caption_style:
+                        # Adjust caption position based on layout type:
+                        # - talking_head: bottom (natural look, face is centered/upper)
+                        # - screen_share: center (between screen top and face bottom)
+                        seg_caption_style = CaptionStyle()
+                        seg_caption_style.font_name = caption_style.font_name
+                        seg_caption_style.font_size = caption_style.font_size
+                        seg_caption_style.primary_color = caption_style.primary_color
+                        seg_caption_style.highlight_color = caption_style.highlight_color
+                        seg_caption_style.outline_color = caption_style.outline_color
+                        seg_caption_style.outline_width = caption_style.outline_width
+                        seg_caption_style.max_words_per_line = caption_style.max_words_per_line
+                        seg_caption_style.word_by_word_highlight = caption_style.word_by_word_highlight
+                        seg_caption_style.alignment = caption_style.alignment
+                        seg_caption_style.bold = caption_style.bold
+                        seg_caption_style.uppercase = caption_style.uppercase
+                        
+                        # Dynamic position based on layout
+                        if layout_seg.layout_type == "talking_head":
+                            seg_caption_style.position = "bottom"
+                        else:  # screen_share
+                            seg_caption_style.position = "center"
+
+                # Build render request for this segment WITH captions per-segment
+                render_request = RenderRequest(
+                    video_path=video_path,
+                    output_path=str(segment_output),
+                    start_time_ms=layout_seg.start_ms,
+                    end_time_ms=layout_seg.end_ms,
+                    source_width=source_width,
+                    source_height=source_height,
+                    layout_type=layout_seg.layout_type,
+                    primary_timeline=crop_timeline,
+                    secondary_timeline=screen_timeline,
+                    transcript_segments=seg_transcript if seg_transcript else None,
+                    caption_style=seg_caption_style,
+                )
+
+                # Render segment
+                await self.rendering_service.render_clip(render_request)
+                segment_files.append(segment_output)
+
+                logger.debug(f"Segment {i + 1} rendered: {segment_output}")
+
+            # Concatenate all segments (captions already burned into each segment)
+            await self._concatenate_segments(segment_files, output_path)
+
+            # Get final file size
+            file_size = os.path.getsize(output_path)
+            duration_ms = segment.end_time_ms - segment.start_time_ms
+
+            logger.info(
+                f"Multi-segment clip rendered: {len(layout_segments)} segments, "
+                f"{file_size / 1024 / 1024:.1f} MB"
+            )
+
+            return RenderResult(
+                output_path=output_path,
+                file_size_bytes=file_size,
+                duration_ms=duration_ms,
+            )
+
+        finally:
+            # Cleanup temp segment files
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp segments dir: {e}")
+
+    def _filter_detection_frames_for_segment(
+        self,
+        detection_frames: list[dict],
+        start_ms: int,
+        end_ms: int,
+    ) -> list[dict]:
+        """Filter detection frames that fall within the given time range."""
+        filtered = []
+        for frame in detection_frames:
+            timestamp_ms = int(frame.get("timestamp_sec", 0) * 1000)
+            if start_ms <= timestamp_ms <= end_ms:
+                filtered.append(frame)
+        return filtered
+
+    async def _concatenate_segments(
+        self,
+        segment_files: list[Path],
+        output_path: str,
+    ) -> None:
+        """
+        Concatenate video segments using FFmpeg concat demuxer.
+
+        Args:
+            segment_files: List of paths to segment video files
+            output_path: Output path for merged video
+        """
+        from pathlib import Path
+
+        if not segment_files:
+            raise ValueError("No segments to concatenate")
+
+        if len(segment_files) == 1:
+            # Single segment - just copy
+            shutil.copy(str(segment_files[0]), output_path)
+            return
+
+        concat_file = Path(output_path).with_suffix('.concat.txt')
+
+        try:
+            # Write concat file
+            with open(concat_file, 'w') as f:
+                for seg_file in segment_files:
+                    # Use absolute path and escape single quotes
+                    safe_path = str(seg_file.absolute()).replace("'", "'\\''")
+                    f.write(f"file '{safe_path}'\n")
+
+            logger.debug(f"Concatenating {len(segment_files)} segments")
+
+            cmd = [
+                'ffmpeg', '-y',
+                '-f', 'concat',
+                '-safe', '0',
+                '-i', str(concat_file),
+                '-c:v', 'libx264',
+                '-c:a', 'aac',
+                '-preset', self.settings.ffmpeg_preset,
+                '-crf', str(self.settings.ffmpeg_crf),
+                '-pix_fmt', 'yuv420p',
+                output_path,
+            ]
+
+            # Use run_in_executor for Windows compatibility
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(cmd, capture_output=True)
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.decode()[-1000:] if result.stderr else "Unknown error"
+                raise RuntimeError(f"FFmpeg concat failed: {error_msg}")
+
+            logger.debug(f"Segments concatenated: {output_path}")
+
+        finally:
+            # Cleanup concat file
+            try:
+                concat_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    async def _add_captions_to_merged_video(
+        self,
+        input_path: str,
+        output_path: str,
+        transcript_segments: list,
+        clip_start_ms: int,
+        clip_end_ms: int,
+        caption_style: Optional[CaptionStyle] = None,
+    ) -> None:
+        """
+        Add captions to a merged video file.
+
+        Args:
+            input_path: Path to input video (merged segments)
+            output_path: Path to final output with captions
+            transcript_segments: Transcript segments for caption generation
+            clip_start_ms: Original clip start time (for time offset calculation)
+            clip_end_ms: Original clip end time
+            caption_style: Caption styling options
+        """
+        from app.services.caption_generator import CaptionGeneratorService
+        from pathlib import Path
+
+        caption_generator = CaptionGeneratorService()
+
+        # Generate caption file
+        caption_filename = f"merged-{clip_start_ms}-{clip_end_ms}.ass"
+        caption_path = str(Path(output_path).parent / caption_filename)
+
+        try:
+            caption_path = await caption_generator.generate_captions(
+                transcript_segments=transcript_segments,
+                clip_start_ms=clip_start_ms,
+                clip_end_ms=clip_end_ms,
+                output_path=caption_path,
+                caption_style=caption_style,
+            )
+
+            # Burn captions into video
+            # FFmpeg filter paths need special escaping for cross-platform support
+            escaped_caption_path = self._escape_ffmpeg_filter_path(caption_path)
+
+            cmd = [
+                'ffmpeg', '-y',
+                '-i', input_path,
+                '-vf', f"ass={escaped_caption_path}",
+                '-c:v', 'libx264',
+                '-c:a', 'copy',
+                '-preset', self.settings.ffmpeg_preset,
+                '-crf', str(self.settings.ffmpeg_crf),
+                '-pix_fmt', 'yuv420p',
+                output_path,
+            ]
+
+            # Use run_in_executor for Windows compatibility
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(cmd, capture_output=True)
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.decode()[-1000:] if result.stderr else "Unknown error"
+                logger.warning(f"Caption burning failed: {error_msg}")
+                # Fallback: copy input to output without captions
+                shutil.copy(input_path, output_path)
+
+        finally:
+            # Cleanup caption file
+            try:
+                if os.path.isfile(caption_path):
+                    os.remove(caption_path)
+            except Exception:
+                pass
+
+    def _escape_ffmpeg_filter_path(self, path: str) -> str:
+        """
+        Escape file path for FFmpeg filter usage.
+        
+        FFmpeg filters have specific path escaping requirements that differ 
+        across platforms. This method handles:
+        - Windows: Convert backslashes to forward slashes, escape drive letter colons
+        - All platforms: Escape special characters that have meaning in FFmpeg filters
+        
+        Args:
+            path: The file path to escape
+            
+        Returns:
+            Escaped path string safe for use in FFmpeg filter expressions
+        """
+        import sys
+        
+        # Normalize path separators to forward slashes (works on all platforms in FFmpeg)
+        escaped = path.replace("\\", "/")
+        
+        # On Windows, escape the drive letter colon (C: -> C\:)
+        # Must be done AFTER backslash replacement to avoid double-escaping
+        if sys.platform == "win32" and len(escaped) >= 2 and escaped[1] == ":":
+            escaped = escaped[0] + "\\:" + escaped[2:]
+        
+        # Escape special characters used in FFmpeg filter syntax
+        # Order matters: escape backslashes first if we add any
+        escaped = escaped.replace("'", "'\\''")  # Escape single quotes for shell
+        escaped = escaped.replace("[", "\\[")
+        escaped = escaped.replace("]", "\\]")
+        
+        # Wrap in single quotes for the filter expression
+        return f"'{escaped}'"
 
     def _filter_transcript_for_clip(
         self,

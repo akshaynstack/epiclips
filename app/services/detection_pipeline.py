@@ -2,6 +2,7 @@
 Detection pipeline that orchestrates all detection services.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -131,113 +132,119 @@ class DetectionPipeline:
         """
         Process a local video file for face detection.
         
-        Uses multi-tier detection (MediaPipe → YOLO → Haar) with outlier filtering
+        Uses multi-tier detection (MediaPipe → Haar) with outlier filtering
         for robust face tracking.
+        
+        CPU-intensive operations are run in thread pool to avoid blocking the event loop.
         
         Returns a dict with 'frames' containing detection data.
         """
         start_time = time.time()
+        loop = asyncio.get_event_loop()
         
-        try:
-            # Open video
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                logger.error(f"Failed to open video: {video_path}")
-                return {"frames": []}
-            
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            duration_sec = total_frames / fps if fps > 0 else 0
-            
-            # Calculate frame positions to sample
-            start_sec = start_time_ms / 1000
-            end_sec = end_time_ms / 1000
-            
-            frames_data = []
-            all_raw_detections = []  # For cross-frame outlier filtering
-            current_time = start_sec
-            
-            logger.info(f"Processing local video: {start_sec:.1f}s - {end_sec:.1f}s, interval={frame_interval_seconds}s")
-            
-            while current_time < end_sec:
-                # Seek to position
-                frame_pos = int(current_time * fps)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+        def _sync_process_video() -> dict:
+            """Synchronous video processing - runs in thread pool."""
+            try:
+                # Open video
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    logger.error(f"Failed to open video: {video_path}")
+                    return {"frames": []}
                 
-                ret, frame = cap.read()
-                if not ret:
-                    current_time += frame_interval_seconds
-                    continue
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30
+                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 
-                # Run face detection with multi-tier fallback
-                face_detections = []
-                raw_detections = []
-                try:
-                    face_result = self.face_detector.detect_faces(
-                        frame,
-                        frame_index=frame_pos,
-                        timestamp_ms=int(current_time * 1000),
-                    )
-                    if face_result and face_result.detections:
-                        raw_detections = face_result.detections
-                        
-                        # Convert to dict format for frame data
-                        for det in raw_detections:
-                            bbox = det.bbox
-                            face_detections.append({
-                                "bbox": {
-                                    "x": bbox[0],
-                                    "y": bbox[1],
-                                    "width": bbox[2],
-                                    "height": bbox[3],
-                                },
-                                "confidence": det.confidence,
-                                "detection_method": det.detection_method,
-                            })
+                # Calculate frame positions to sample
+                start_sec = start_time_ms / 1000
+                end_sec = end_time_ms / 1000
+                
+                frames_data = []
+                all_raw_detections = []  # For cross-frame outlier filtering
+                current_time = start_sec
+                
+                logger.info(f"Processing local video: {start_sec:.1f}s - {end_sec:.1f}s, interval={frame_interval_seconds}s")
+                
+                while current_time < end_sec:
+                    # Seek to position
+                    frame_pos = int(current_time * fps)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                    
+                    ret, frame = cap.read()
+                    if not ret:
+                        current_time += frame_interval_seconds
+                        continue
+                    
+                    # Run face detection with multi-tier fallback
+                    face_detections = []
+                    raw_detections = []
+                    try:
+                        face_result = self.face_detector.detect_faces(
+                            frame,
+                            frame_index=frame_pos,
+                            timestamp_ms=int(current_time * 1000),
+                        )
+                        if face_result and face_result.detections:
+                            raw_detections = face_result.detections
                             
-                except Exception as e:
-                    logger.warning(f"Face detection failed at {current_time:.1f}s: {e}")
-                
-                # Store for cross-frame outlier filtering
-                all_raw_detections.extend(raw_detections)
-                
-                frames_data.append({
-                    "timestamp_sec": current_time,
-                    "frame_index": frame_pos,
-                    "detections": face_detections,
-                })
-                
-                current_time += frame_interval_seconds
-            
-            cap.release()
-            
-            # Apply cross-frame outlier filtering
-            # This removes false positive detections that are far from the main cluster
-            if all_raw_detections and len(all_raw_detections) >= 3:
-                filtered_detections = self.face_detector.filter_outliers(all_raw_detections)
-                
-                if len(filtered_detections) < len(all_raw_detections):
-                    logger.info(f"Outlier filtering: {len(all_raw_detections)} -> {len(filtered_detections)} detections")
+                            # Convert to dict format for frame data
+                            for det in raw_detections:
+                                bbox = det.bbox
+                                face_detections.append({
+                                    "bbox": {
+                                        "x": bbox[0],
+                                        "y": bbox[1],
+                                        "width": bbox[2],
+                                        "height": bbox[3],
+                                    },
+                                    "confidence": det.confidence,
+                                    "detection_method": det.detection_method,
+                                })
+                                
+                    except Exception as e:
+                        logger.warning(f"Face detection failed at {current_time:.1f}s: {e}")
                     
-                    # Build set of valid bbox tuples for quick lookup
-                    valid_bboxes = set(det.bbox for det in filtered_detections)
+                    # Store for cross-frame outlier filtering
+                    all_raw_detections.extend(raw_detections)
                     
-                    # Filter frames data to only include valid detections
-                    for frame_data in frames_data:
-                        frame_data["detections"] = [
-                            d for d in frame_data["detections"]
-                            if (d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["width"], d["bbox"]["height"]) in valid_bboxes
-                        ]
-            
-            processing_time = time.time() - start_time
-            total_faces = sum(len(f['detections']) for f in frames_data)
-            logger.info(f"Local video detection complete: {len(frames_data)} frames, {total_faces} faces, {processing_time:.1f}s")
-            
-            return {"frames": frames_data}
-            
-        except Exception as e:
-            logger.error(f"Local video processing failed: {e}", exc_info=True)
-            return {"frames": []}
+                    frames_data.append({
+                        "timestamp_sec": current_time,
+                        "frame_index": frame_pos,
+                        "detections": face_detections,
+                    })
+                    
+                    current_time += frame_interval_seconds
+                
+                cap.release()
+                
+                # Apply cross-frame outlier filtering
+                if all_raw_detections and len(all_raw_detections) >= 3:
+                    filtered_detections = self.face_detector.filter_outliers(all_raw_detections)
+                    
+                    if len(filtered_detections) < len(all_raw_detections):
+                        logger.info(f"Outlier filtering: {len(all_raw_detections)} -> {len(filtered_detections)} detections")
+                        
+                        # Build set of valid bbox tuples for quick lookup
+                        valid_bboxes = set(det.bbox for det in filtered_detections)
+                        
+                        # Filter frames data to only include valid detections
+                        for frame_data in frames_data:
+                            frame_data["detections"] = [
+                                d for d in frame_data["detections"]
+                                if (d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["width"], d["bbox"]["height"]) in valid_bboxes
+                            ]
+                
+                processing_time = time.time() - start_time
+                total_faces = sum(len(f['detections']) for f in frames_data)
+                logger.info(f"Local video detection complete: {len(frames_data)} frames, {total_faces} faces, {processing_time:.1f}s")
+                
+                return {"frames": frames_data}
+                
+            except Exception as e:
+                logger.error(f"Local video processing failed: {e}", exc_info=True)
+                return {"frames": []}
+        
+        # Run CPU-intensive detection in thread pool to avoid blocking event loop
+        return await loop.run_in_executor(None, _sync_process_video)
 
     async def _process_s3_video(
         self,

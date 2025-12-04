@@ -1,6 +1,0 @@
-# This directory contains YOLO model weights
-# Models are downloaded during Docker build
-# Do not commit .pt or .onnx files
-
-
-

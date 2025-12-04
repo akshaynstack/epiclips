@@ -17,7 +17,10 @@ from app.auth import verify_api_key
 DurationRangeType = Literal["short", "medium", "long"]
 
 # Layout type for clip rendering
-LayoutTypeInput = Literal["split_screen", "talking_head"]
+# NOTE: Layout is now always automatic - the AI detects and switches layouts dynamically.
+# The "split_screen" and "talking_head" options are deprecated and will be ignored.
+# Kept for backward compatibility with older API clients.
+LayoutTypeInput = Literal["auto", "split_screen", "talking_head"]
 
 # Duration range configuration
 DURATION_RANGE_CONFIG = {
@@ -97,8 +100,9 @@ class ClipJobSubmitRequest(BaseModel):
     )
     caption_style: Optional[CaptionStyleInput] = Field(None, description="Custom caption styling (used if caption_preset not provided)")
     layout_type: Optional[LayoutTypeInput] = Field(
-        "split_screen",
-        description="Layout type: 'split_screen' (screen top, face bottom), 'talking_head' (face-focused)"
+        "auto",
+        deprecated=True,
+        description="DEPRECATED: Layout detection is now always automatic. The AI analyzes each frame and dynamically switches between layouts mid-clip for optimal framing. This field is ignored."
     )
     callback_url: Optional[str] = Field(None, description="Webhook URL for progress updates")
 
@@ -270,27 +274,27 @@ class LayoutPresetResponse(BaseModel):
     preview_layout: dict[str, str]
 
 
-@router.get("/layout-presets", response_model=list[LayoutPresetResponse])
+@router.get("/layout-presets", response_model=list[LayoutPresetResponse], deprecated=True)
 async def list_layout_presets() -> list[LayoutPresetResponse]:
     """
-    List all available layout presets.
+    DEPRECATED: Layout detection is now always automatic.
 
-    Returns layout IDs, names, descriptions, icons, and preview info for UI rendering.
+    The AI analyzes each frame and dynamically switches between talking head
+    and screen share layouts mid-clip for optimal framing. Users no longer
+    need to select a layout.
 
-    Available layouts:
-    - split_screen: Screen content on top, face close-up on bottom (50/50 split)
-    - talking_head: Dynamic face-focused crop that follows the speaker
+    This endpoint is maintained for backward compatibility but only returns
+    the automatic layout option.
     """
-    layouts = get_available_layouts()
+    # Return only the auto preset - layout selection is now automatic
     return [
         LayoutPresetResponse(
-            id=layout["id"],
-            name=layout["name"],
-            description=layout["description"],
-            icon=layout["icon"],
-            preview_layout=layout["preview_layout"],
+            id="auto",
+            name="Automatic",
+            description="AI automatically detects and switches between layouts for optimal framing",
+            icon="sparkles",
+            preview_layout={"type": "dynamic", "description": "AI-powered scene detection"},
         )
-        for layout in layouts
     ]
 
 
@@ -487,7 +491,11 @@ async def submit_clipping_job(
     if max_duration is None:
         max_duration = 90
     
-    # Create job request
+    # Log if deprecated layout_type was requested (for migration tracking)
+    if request.layout_type and request.layout_type != "auto":
+        logger.info(f"Ignoring deprecated layout_type '{request.layout_type}' - using automatic layout detection")
+
+    # Create job request - always use "auto" for dynamic layout detection
     job_request = ClippingJobRequest(
         video_url=video_source,
         job_id=request.external_job_id,  # Use external ID if provided
@@ -500,7 +508,7 @@ async def submit_clipping_job(
         target_platform=request.target_platform,
         include_captions=request.include_captions,
         caption_style=caption_style,
-        layout_type=request.layout_type or "split_screen",
+        layout_type="auto",  # Always use automatic layout detection
         callback_url=request.callback_url,
     )
     
