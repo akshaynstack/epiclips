@@ -622,7 +622,11 @@ class RenderingService:
         start_time_ms: int,
         duration_ms: int,
     ) -> None:
-        """Merge 2 regions vertically and overlay captions on the combined video."""
+        """Merge 2 regions vertically and overlay captions on the combined video.
+        
+        Note: screen_path and face_path are already trimmed videos starting at 0.
+        We need to extract audio from original_video_path at the correct offset.
+        """
         start_sec = start_time_ms / 1000
         duration_sec = duration_ms / 1000
 
@@ -634,17 +638,19 @@ class RenderingService:
         else:
             filter_complex = "[0:v][1:v]vstack=inputs=2[out]"
 
+        # The temp videos (screen, face) already start at 0 and have correct duration.
+        # We only need to seek the original video for audio extraction.
         cmd = [
             "ffmpeg",
             "-y",
-            "-i", screen_path,    # Input 0: screen (top)
-            "-i", face_path,      # Input 1: face (bottom)
-            "-ss", str(start_sec),
-            "-t", str(duration_sec),
+            "-i", screen_path,    # Input 0: screen (top) - already trimmed, starts at 0
+            "-i", face_path,      # Input 1: face (bottom) - already trimmed, starts at 0
+            "-ss", f"{start_sec:.3f}",  # Seek original video for audio
+            "-t", f"{duration_sec:.3f}",
             "-i", original_video_path,  # Input 2: original for audio
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-map", "2:a?",  # Audio from original video
+            "-map", "2:a?",  # Audio from original video (already seeked)
             "-c:v", "libx264",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -875,7 +881,11 @@ class RenderingService:
         start_time_ms: int,
         duration_ms: int,
     ) -> None:
-        """Merge two streams vertically with vstack."""
+        """Merge two streams vertically with vstack.
+        
+        Note: top_path and bottom_path are already trimmed videos starting at 0.
+        We need to extract audio from original_video_path at the correct offset.
+        """
         # Build filter complex
         filter_complex = "[0:v][1:v]vstack=inputs=2[stacked]"
         
@@ -888,17 +898,19 @@ class RenderingService:
         start_sec = start_time_ms / 1000
         duration_sec = duration_ms / 1000
         
+        # The temp videos (top, bottom) already start at 0 and have correct duration.
+        # We only need to seek the original video for audio extraction.
         cmd = [
             "ffmpeg",
             "-y",
-            "-i", top_path,
-            "-i", bottom_path,
-            "-ss", str(start_sec),
-            "-t", str(duration_sec),
+            "-i", top_path,       # Already trimmed, starts at 0
+            "-i", bottom_path,    # Already trimmed, starts at 0
+            "-ss", f"{start_sec:.3f}",  # Seek original video for audio
+            "-t", f"{duration_sec:.3f}",
             "-i", original_video_path,
             "-filter_complex", filter_complex,
             "-map", "[out]",
-            "-map", "2:a?",  # Audio from original video
+            "-map", "2:a?",  # Audio from original video (already seeked)
             "-c:a", "aac",
             "-b:a", "192k",
             "-preset", self.settings.ffmpeg_preset,
@@ -917,23 +929,33 @@ class RenderingService:
         source_width: int,
         source_height: int,
     ) -> str:
-        """Build FFmpeg crop expression with dynamic X,Y."""
+        """Build FFmpeg crop expression with static averaged position.
+        
+        Dynamic panning has been disabled to avoid glitchy/jittery camera movement
+        caused by inconsistent frame-to-frame face detection. Instead, we use
+        the averaged position across all keyframes for stable framing.
+        """
         window_width = min(timeline.window_width, source_width)
         window_height = min(timeline.window_height, source_height)
         keyframes = timeline.keyframes
         
-        # If few keyframes, use static crop
-        if len(keyframes) <= 2:
-            avg_x = sum(k.center_x for k in keyframes) / len(keyframes)
-            avg_y = sum(k.center_y for k in keyframes) / len(keyframes)
-            
-            max_x = source_width - window_width
-            max_y = source_height - window_height
-            
-            x = 0 if max_x <= 0 else max(0, min(max_x, int(avg_x - window_width / 2)))
-            y = 0 if max_y <= 0 else max(0, min(max_y, int(avg_y - window_height / 2)))
-            
-            return f"crop={window_width}:{window_height}:{x}:{y}"
+        # DISABLED: Dynamic panning causes glitchy movement
+        # Always use static averaged position for stable framing
+        avg_x = sum(k.center_x for k in keyframes) / len(keyframes)
+        avg_y = sum(k.center_y for k in keyframes) / len(keyframes)
+        
+        max_x = source_width - window_width
+        max_y = source_height - window_height
+        
+        x = 0 if max_x <= 0 else max(0, min(max_x, int(avg_x - window_width / 2)))
+        y = 0 if max_y <= 0 else max(0, min(max_y, int(avg_y - window_height / 2)))
+        
+        logger.info(f"Static crop: {window_width}x{window_height} at ({x}, {y}) from {len(keyframes)} keyframes")
+        
+        return f"crop={window_width}:{window_height}:{x}:{y}"
+        
+        # NOTE: The code below is preserved but disabled.
+        # To re-enable dynamic panning, remove the return statement above.
         
         # Build interpolation expressions for X and Y
         half_w = window_width / 2
@@ -1026,12 +1048,15 @@ class RenderingService:
         include_audio: bool = True,
     ) -> None:
         """Run FFmpeg with given filters."""
+        start_sec = start_time_ms / 1000
+        duration_sec = duration_ms / 1000
+        
         cmd = [
             "ffmpeg",
             "-y",
-            "-ss", str(start_time_ms / 1000),
+            "-ss", f"{start_sec:.3f}",
             "-i", input_path,
-            "-t", str(duration_ms / 1000),
+            "-t", f"{duration_sec:.3f}",
             "-vf", ",".join(video_filters),
             "-preset", self.settings.ffmpeg_preset,
             "-crf", str(self.settings.ffmpeg_crf),
