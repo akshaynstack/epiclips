@@ -35,13 +35,18 @@ class CaptionStyle:
 
 class LayoutType:
     """
-    Available layout type identifiers for clip rendering.
+    Layout type identifiers for clip rendering.
 
-    Users can select from these layouts to control how clips are composed.
+    NOTE: Layout selection is now always automatic. The AI analyzes each frame
+    and dynamically switches between layouts mid-clip for optimal framing.
+
+    SPLIT_SCREEN and TALKING_HEAD are kept for internal use by the SmartLayoutDetector
+    but are no longer exposed as user-selectable options.
     """
-    AUTO = "auto"                    # AI-powered dynamic layout detection - switches mid-clip
-    SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (50/50 split)
-    TALKING_HEAD = "talking_head"    # Face-focused single crop that follows the speaker
+    AUTO = "auto"                    # AI-powered dynamic layout detection - always used
+    # Internal layout types detected by SmartLayoutDetector:
+    SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (detected automatically)
+    TALKING_HEAD = "talking_head"    # Face-focused single crop (detected automatically)
 
 
 def get_layout_preset(layout_id: str) -> dict:
@@ -97,32 +102,21 @@ def get_layout_preset(layout_id: str) -> dict:
 
 def get_available_layouts() -> list[dict]:
     """
-    Get list of available layout presets with metadata.
+    DEPRECATED: Get list of available layout presets.
+
+    Layout selection is now always automatic. This function only returns
+    the auto preset for backward compatibility with older clients.
 
     Returns:
-        List of layout info dicts with id, name, description, and preview info
+        List containing only the auto layout preset
     """
     return [
         {
             "id": LayoutType.AUTO,
-            "name": "Auto (Recommended)",
-            "description": "AI detects layout changes and switches dynamically mid-clip - best for mixed content",
-            "icon": "sparkles",  # lucide icon name for frontend
-            "preview_layout": {"dynamic": True},
-        },
-        {
-            "id": LayoutType.SPLIT_SCREEN,
-            "name": "Split Screen",
-            "description": "Screen content on top, face close-up on bottom - optimal for tutorials and screen recordings",
-            "icon": "layout-grid",  # lucide icon name for frontend
-            "preview_layout": {"top": "screen", "bottom": "face"},
-        },
-        {
-            "id": LayoutType.TALKING_HEAD,
-            "name": "Talking Head",
-            "description": "Dynamic face-focused crop that follows the speaker - perfect for podcasts and vlogs",
-            "icon": "user",
-            "preview_layout": {"full": "face"},
+            "name": "Automatic",
+            "description": "AI automatically detects and switches between layouts for optimal framing",
+            "icon": "sparkles",
+            "preview_layout": {"dynamic": True, "description": "AI-powered scene detection"},
         },
     ]
 
