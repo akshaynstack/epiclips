@@ -53,9 +53,10 @@ class FaceDetector:
     """
 
     # Face size bounds as fraction of frame area
-    # Lowered from 0.5% to 0.1% to detect small webcam faces in screen shares
-    MIN_FACE_AREA_RATIO = 0.001  # 0.1% of frame (allows ~45x45 face in 1080p)
-    MAX_FACE_AREA_RATIO = 0.30   # 30% of frame
+    # Lowered to 0.03% to detect very small webcam overlay faces in screen shares
+    # 0.0003 = ~25x25 face in 1080p, 0.001 = ~45x45 face in 1080p
+    MIN_FACE_AREA_RATIO = 0.0003  # 0.03% of frame (allows ~25x25 face in 1080p)
+    MAX_FACE_AREA_RATIO = 0.30    # 30% of frame
 
     def __init__(
         self,
@@ -313,8 +314,8 @@ class FaceDetector:
                 w = int(bbox.width * width)
                 h = int(bbox.height * height)
                 
-                # Minimum face size filter
-                if w > 30 and h > 30:
+                # Minimum face size filter (reduced for small webcam overlays)
+                if w > 20 and h > 20:
                     detections.append(FaceDetectionResult(
                         bbox=(x, y, w, h),
                         confidence=confidence,
@@ -347,7 +348,8 @@ class FaceDetector:
                 w = x2 - x1
                 h = y2 - y1
                 
-                if w > 30 and h > 30:
+                # Minimum face size filter (reduced for small webcam overlays)
+                if w > 20 and h > 20:
                     detections.append(FaceDetectionResult(
                         bbox=(x1, y1, w, h),
                         confidence=float(confidence),
@@ -406,7 +408,12 @@ class FaceDetector:
             if self.MIN_FACE_AREA_RATIO <= ratio <= self.MAX_FACE_AREA_RATIO:
                 filtered.append(det)
             else:
-                logger.debug(f"Filtered face with area ratio {ratio:.3f} (bounds: {self.MIN_FACE_AREA_RATIO}-{self.MAX_FACE_AREA_RATIO})")
+                # Log with actual dimensions for easier debugging
+                reason = "too small" if ratio < self.MIN_FACE_AREA_RATIO else "too large"
+                logger.debug(
+                    f"Filtered face ({reason}): {w}x{h}px at ({x},{y}), "
+                    f"area_ratio={ratio:.5f} (bounds: {self.MIN_FACE_AREA_RATIO}-{self.MAX_FACE_AREA_RATIO})"
+                )
         
         return filtered
 
@@ -661,3 +668,249 @@ class FaceDetector:
         self._dnn_net = None
         self._haar_cascade = None
         self._ready = False
+
+    def detect_faces_adaptive(
+        self,
+        image: np.ndarray,
+        frame_index: int = 0,
+        timestamp_ms: int = 0,
+        previous_detections: Optional[List[FaceDetectionResult]] = None,
+        expected_face_count: int = 0,
+    ) -> FrameFaceDetections:
+        """
+        Detect faces with adaptive thresholds based on previous detections.
+        
+        This method adjusts detection parameters based on:
+        1. Previous face detections (if faces were found before, try harder)
+        2. Expected face count (if we expect faces, lower thresholds)
+        
+        This is useful for tracking scenarios where we know faces exist
+        but may be temporarily hard to detect (motion blur, occlusion).
+        
+        Args:
+            image: Image as numpy array (BGR format from OpenCV)
+            frame_index: Index of the frame
+            timestamp_ms: Timestamp in milliseconds
+            previous_detections: Previous frame's detections for adaptive search
+            expected_face_count: Expected number of faces (0 = unknown)
+            
+        Returns:
+            FrameFaceDetections with all detected faces
+        """
+        # First try normal detection
+        result = self.detect_faces(image, frame_index, timestamp_ms)
+        
+        # If we got faces, return them
+        if result.detections:
+            return result
+        
+        # If we expected faces or had previous detections, try harder
+        if previous_detections or expected_face_count > 0:
+            logger.debug(f"Frame {frame_index}: No faces found, trying multi-scale detection...")
+            return self.detect_faces_multiscale(image, frame_index, timestamp_ms)
+        
+        return result
+
+    def detect_faces_multiscale(
+        self,
+        image: np.ndarray,
+        frame_index: int = 0,
+        timestamp_ms: int = 0,
+        scales: Optional[List[float]] = None,
+    ) -> FrameFaceDetections:
+        """
+        Detect faces using multiple image scales for better small face detection.
+        
+        This method upscales the image to detect very small faces that might
+        be missed at native resolution. Useful for small webcam overlays.
+        
+        Args:
+            image: Image as numpy array (BGR format from OpenCV)
+            frame_index: Index of the frame
+            timestamp_ms: Timestamp in milliseconds
+            scales: List of scale factors to try (default: [1.0, 1.5, 2.0])
+            
+        Returns:
+            FrameFaceDetections with all detected faces (merged across scales)
+        """
+        if scales is None:
+            scales = [1.0, 1.5, 2.0]
+        
+        height, width = image.shape[:2]
+        frame_area = width * height
+        all_detections: List[FaceDetectionResult] = []
+        
+        for scale in scales:
+            if scale == 1.0:
+                # Use normal detection at native scale
+                scaled_image = image
+                scaled_width, scaled_height = width, height
+            else:
+                # Upscale the image
+                scaled_width = int(width * scale)
+                scaled_height = int(height * scale)
+                
+                # Skip if upscaled image is too large (>4K)
+                if scaled_width > 3840 or scaled_height > 2160:
+                    continue
+                
+                scaled_image = cv2.resize(
+                    image,
+                    (scaled_width, scaled_height),
+                    interpolation=cv2.INTER_LINEAR
+                )
+            
+            # Detect faces at this scale
+            if self._mediapipe_detector_fullrange is not None:
+                try:
+                    rgb_image = cv2.cvtColor(scaled_image, cv2.COLOR_BGR2RGB)
+                    results = self._mediapipe_detector_fullrange.process(rgb_image)
+                    
+                    if results.detections:
+                        for detection in results.detections:
+                            bbox = detection.location_data.relative_bounding_box
+                            confidence = detection.score[0]
+                            
+                            # Convert to absolute coords at scaled size, then back to original
+                            x = int(bbox.xmin * scaled_width / scale)
+                            y = int(bbox.ymin * scaled_height / scale)
+                            w = int(bbox.width * scaled_width / scale)
+                            h = int(bbox.height * scaled_height / scale)
+                            
+                            if w > 15 and h > 15:  # Even lower threshold for multiscale
+                                all_detections.append(FaceDetectionResult(
+                                    bbox=(x, y, w, h),
+                                    confidence=confidence,
+                                    detection_method=f"mediapipe_fullrange_x{scale}",
+                                ))
+                                logger.debug(f"Multiscale ({scale}x) detected face: {w}x{h} at ({x},{y})")
+                except Exception as e:
+                    logger.debug(f"Multiscale detection at {scale}x failed: {e}")
+        
+        if not all_detections:
+            return FrameFaceDetections(
+                frame_index=frame_index,
+                timestamp_ms=timestamp_ms,
+                detections=[],
+            )
+        
+        # Merge overlapping detections from different scales
+        merged = self._merge_multiscale_detections(all_detections, width, height)
+        
+        # Filter by size bounds
+        merged = self._filter_by_size(merged, frame_area)
+        
+        logger.debug(f"Multiscale detection found {len(merged)} unique faces across {len(scales)} scales")
+        
+        return FrameFaceDetections(
+            frame_index=frame_index,
+            timestamp_ms=timestamp_ms,
+            detections=merged,
+        )
+
+    def _merge_multiscale_detections(
+        self,
+        detections: List[FaceDetectionResult],
+        frame_width: int,
+        frame_height: int,
+    ) -> List[FaceDetectionResult]:
+        """
+        Merge face detections from multiple scales, removing duplicates.
+        
+        Uses NMS (Non-Maximum Suppression) to keep the best detection
+        for each unique face.
+        """
+        if len(detections) <= 1:
+            return detections
+        
+        # Sort by confidence (highest first)
+        sorted_dets = sorted(detections, key=lambda d: d.confidence, reverse=True)
+        
+        kept: List[FaceDetectionResult] = []
+        
+        for det in sorted_dets:
+            is_duplicate = False
+            
+            for kept_det in kept:
+                iou = self._calculate_iou(det.bbox, kept_det.bbox)
+                if iou > 0.4:  # Slightly higher threshold for NMS
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                kept.append(det)
+        
+        return kept
+
+    def detect_faces_in_region(
+        self,
+        image: np.ndarray,
+        region: Tuple[int, int, int, int],
+        frame_index: int = 0,
+        timestamp_ms: int = 0,
+    ) -> FrameFaceDetections:
+        """
+        Detect faces in a specific region of the image.
+        
+        This is useful for:
+        1. Re-detecting faces near where they were last seen
+        2. Focusing on known webcam overlay areas
+        3. Reducing false positives from main screen content
+        
+        Args:
+            image: Full image as numpy array (BGR format)
+            region: Region to search (x, y, width, height)
+            frame_index: Index of the frame
+            timestamp_ms: Timestamp in milliseconds
+            
+        Returns:
+            FrameFaceDetections with faces found in the region
+        """
+        x, y, w, h = region
+        height, width = image.shape[:2]
+        
+        # Clamp region to image bounds
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = min(w, width - x)
+        h = min(h, height - y)
+        
+        if w < 30 or h < 30:
+            return FrameFaceDetections(
+                frame_index=frame_index,
+                timestamp_ms=timestamp_ms,
+                detections=[],
+            )
+        
+        # Crop region
+        region_image = image[y:y+h, x:x+w]
+        
+        # Add padding to help detection (face detectors often need context)
+        pad = 20
+        padded_x = max(0, x - pad)
+        padded_y = max(0, y - pad)
+        padded_w = min(w + 2 * pad, width - padded_x)
+        padded_h = min(h + 2 * pad, height - padded_y)
+        
+        region_image = image[padded_y:padded_y+padded_h, padded_x:padded_x+padded_w]
+        
+        # Detect faces in region
+        result = self.detect_faces(region_image, frame_index, timestamp_ms)
+        
+        # Adjust coordinates back to full image
+        adjusted_detections = []
+        for det in result.detections:
+            dx, dy, dw, dh = det.bbox
+            adjusted_detections.append(FaceDetectionResult(
+                bbox=(dx + padded_x, dy + padded_y, dw, dh),
+                confidence=det.confidence,
+                landmarks=det.landmarks,
+                embedding=det.embedding,
+                detection_method=det.detection_method + "_region",
+            ))
+        
+        return FrameFaceDetections(
+            frame_index=frame_index,
+            timestamp_ms=timestamp_ms,
+            detections=adjusted_detections,
+        )

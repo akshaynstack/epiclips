@@ -7,6 +7,7 @@ This service analyzes video clips to detect layout types and transitions:
 3. Detects transitions between layouts
 4. Merges short segments to avoid flickering
 5. Returns a timeline with layout segments for segment-based rendering
+6. NEW: Uses FaceTracker for robust dominant face tracking across frames
 
 Similar to epiriumaiclips' smart_layout.py functionality.
 """
@@ -76,6 +77,9 @@ class LayoutAnalysis:
     # Corner facecam position (x, y, width, height) - average across frames
     # Used for split screen rendering to crop the corner webcam, not the main face
     corner_facecam_bbox: Optional[tuple[int, int, int, int]] = None
+    
+    # VLM-detected webcam position (e.g., "bottom-right")
+    webcam_position: Optional[str] = None
     
     # Speaker-driven layout data (new)
     speaker_analysis: Optional[any] = None  # SpeakerAnalysis from speaker_tracker
@@ -251,6 +255,7 @@ class SmartLayoutDetector:
                                 frame_analyses=[],
                                 has_embedded_facecam=vlm_result.has_corner_webcam,
                                 corner_facecam_bbox=vlm_result.webcam_bbox_estimate,
+                                webcam_position=vlm_result.webcam_position,
                                 speaker_analysis=None,
                                 active_speaker_count=1,
                                 layout_driven_by_speakers=False,
@@ -273,6 +278,7 @@ class SmartLayoutDetector:
                         frame_analyses=[],
                         has_embedded_facecam=vlm_result.has_corner_webcam,
                         corner_facecam_bbox=vlm_result.webcam_bbox_estimate,
+                        webcam_position=vlm_result.webcam_position,
                         speaker_analysis=None,
                         active_speaker_count=1,
                         layout_driven_by_speakers=False,
@@ -767,9 +773,9 @@ class SmartLayoutDetector:
         frame_layouts = []
         
         # Thresholds for corner facecam detection - TIGHTENED to avoid false positives
-        # Real webcam overlays are typically 0.2%-3% of frame area
-        CORNER_FACECAM_MAX_AREA = 0.04   # Corner facecam is < 4% of frame (reduced from 8%)
-        CORNER_FACECAM_MIN_AREA = 0.002  # Minimum 0.2% to catch small webcams
+        # Real webcam overlays are typically 0.03%-3% of frame area (very small corner webcams)
+        CORNER_FACECAM_MAX_AREA = 0.04    # Corner facecam is < 4% of frame (reduced from 8%)
+        CORNER_FACECAM_MIN_AREA = 0.0003  # Minimum 0.03% to catch very small webcams (matches face_detector)
         CORNER_THRESHOLD = 0.25  # Outer 25% of frame is "corner" (tightened from 30%)
         # Note: Removed EDGE_THRESHOLD - now require TRUE corner (both X and Y), not just edge
         
@@ -822,7 +828,8 @@ class SmartLayoutDetector:
                     w = bbox.get("width", 0)
                     h = bbox.get("height", 0)
                     
-                    if w < 30 or h < 30:
+                    # Allow smaller faces for corner webcams (reduced from 30x30 to 20x20)
+                    if w < 20 or h < 20:
                         rejected_reasons.append(f"too_small({w}x{h})")
                         continue
                     
@@ -2152,3 +2159,159 @@ class SmartLayoutDetector:
                 video_path, start_ms, end_ms, face_detections, sample_fps
             )
         )
+
+    async def analyze_with_face_tracking(
+        self,
+        video_path: str,
+        start_ms: int,
+        end_ms: int,
+        frame_width: int = 1920,
+        frame_height: int = 1080,
+        sample_fps: float = 10.0,
+    ) -> tuple[LayoutAnalysis, Optional["TrackingResult"]]:
+        """
+        Analyze layout with robust face tracking for dominant face detection.
+        
+        This method uses the FaceTracker service for frame-by-frame face tracking
+        which provides:
+        1. Consistent face tracking across frames (temporal smoothing)
+        2. Dominant face identification (the MAIN person to show in split-screen)
+        3. Smoothed bounding boxes for stable rendering
+        
+        Args:
+            video_path: Path to the video file
+            start_ms: Start time in milliseconds
+            end_ms: End time in milliseconds
+            frame_width: Video frame width
+            frame_height: Video frame height
+            sample_fps: FPS for face tracking (higher = more accurate, slower)
+            
+        Returns:
+            Tuple of (LayoutAnalysis, TrackingResult or None)
+            - LayoutAnalysis: Layout segments and transitions
+            - TrackingResult: Face tracking data with dominant face info
+        """
+        try:
+            from app.services.face_tracker import track_faces_in_video, TrackingResult
+        except ImportError:
+            logger.warning("FaceTracker not available, using standard analysis")
+            layout = await self.analyze_clip_layout(
+                video_path, start_ms, end_ms, sample_fps=sample_fps
+            )
+            return (layout, None)
+        
+        logger.info(
+            f"Running face tracking analysis: {start_ms}ms - {end_ms}ms at {sample_fps} FPS"
+        )
+        
+        try:
+            # Run face tracking
+            tracking_result = await track_faces_in_video(
+                video_path=video_path,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                sample_fps=sample_fps,
+            )
+            
+            if tracking_result.dominant_track:
+                logger.info(
+                    f"Face tracking complete: {len(tracking_result.tracks)} tracks, "
+                    f"dominant_track_id={tracking_result.dominant_track_id}, "
+                    f"dominant_visibility={tracking_result.dominant_face_visibility:.1%}, "
+                    f"dominance_score={tracking_result.dominant_track.dominance_score:.3f}"
+                )
+                
+                # If we found a dominant face, update the layout analysis with its bbox
+                dominant_bbox = tracking_result.dominant_track.smoothed_bbox
+                
+                if dominant_bbox:
+                    # Run standard layout analysis
+                    layout = await self.analyze_clip_layout(
+                        video_path, start_ms, end_ms, sample_fps=3.0
+                    )
+                    
+                    # Override corner_facecam_bbox with tracked dominant face
+                    # ONLY if the dominant face looks like a corner webcam (small, in corner)
+                    x, y, w, h = dominant_bbox
+                    face_area_ratio = (w * h) / (frame_width * frame_height)
+                    
+                    # Check if face is in corner region (outer 30%)
+                    center_x = x + w / 2
+                    center_y = y + h / 2
+                    is_in_corner = (
+                        (center_x < frame_width * 0.30 or center_x > frame_width * 0.70) or
+                        (center_y < frame_height * 0.30 or center_y > frame_height * 0.70)
+                    )
+                    
+                    # If face is small (< 10% of frame) and in corner, it's likely a webcam overlay
+                    # In that case, use it for split-screen rendering
+                    if face_area_ratio < 0.10 and is_in_corner:
+                        logger.info(
+                            f"Dominant face is webcam overlay: {w}x{h} at ({x},{y}), "
+                            f"area_ratio={face_area_ratio:.2%}, is_in_corner={is_in_corner}"
+                        )
+                        layout.corner_facecam_bbox = dominant_bbox
+                        
+                        # Update all screen_share segments with this bbox
+                        for seg in layout.layout_segments:
+                            if seg.layout_type == "screen_share":
+                                seg.corner_facecam_bbox = dominant_bbox
+                    else:
+                        # Face is large/centered - likely the main subject in talking head
+                        logger.info(
+                            f"Dominant face is main subject (not webcam overlay): {w}x{h} at ({x},{y}), "
+                            f"area_ratio={face_area_ratio:.2%}, is_in_corner={is_in_corner}"
+                        )
+                    
+                    return (layout, tracking_result)
+            else:
+                logger.warning("No dominant face found in tracking")
+                
+        except Exception as e:
+            logger.warning(f"Face tracking failed: {e}, falling back to standard analysis")
+        
+        # Fallback to standard analysis
+        layout = await self.analyze_clip_layout(
+            video_path, start_ms, end_ms, sample_fps=3.0
+        )
+        return (layout, None)
+
+
+def get_dominant_face_for_clip(
+    tracking_result: "TrackingResult",
+    timestamp_ms: int,
+    frame_width: int,
+    frame_height: int,
+) -> Optional[tuple[int, int, int, int]]:
+    """
+    Get the dominant face bounding box at a specific timestamp.
+    
+    This is a helper function for rendering to get the smoothed,
+    tracked face position at any point in time.
+    
+    Args:
+        tracking_result: TrackingResult from analyze_with_face_tracking
+        timestamp_ms: Timestamp in milliseconds
+        frame_width: Video frame width
+        frame_height: Video frame height
+        
+    Returns:
+        (x, y, width, height) of the dominant face, or None
+    """
+    if not tracking_result or not tracking_result.frame_results:
+        return None
+    
+    # Find the closest frame to the requested timestamp
+    closest_frame = None
+    min_diff = float('inf')
+    
+    for frame_result in tracking_result.frame_results:
+        diff = abs(frame_result.timestamp_ms - timestamp_ms)
+        if diff < min_diff:
+            min_diff = diff
+            closest_frame = frame_result
+    
+    if closest_frame and closest_frame.dominant_face_bbox:
+        return closest_frame.dominant_face_bbox
+    
+    return None

@@ -153,30 +153,29 @@ class VLMLayoutDetector:
         # Prompt for layout detection - optimized for accuracy
         prompt = """Analyze this video screenshot to determine the layout type.
 
-QUESTION 1: What is the MAIN CONTENT of this frame?
-- Screen content: code, browser, slides, tables, data, software UI, documents, websites
-- Person/face: someone's face or body is the main focus
+CRITICAL DISTINCTION - READ CAREFULLY:
 
-QUESTION 2: Is there a WEBCAM OVERLAY in a corner?
-- A SMALL face box (10-25% of screen) in a corner: top-left, top-right, bottom-left, bottom-right
-- The webcam shows a person separate from the main content
+**TALKING HEAD** = A person's face/body is the MAIN SUBJECT of the frame:
+- Person takes up >30% of the frame
+- Person is centered or near-center
+- Background may show room, whiteboard, wall, office - but person is the FOCUS
+- NO screen recording, NO slides, NO code, NO browser visible
+- Face is FULL SIZE, not a tiny overlay
 
-LAYOUT TYPES:
-1. "screen_recording" + webcam overlay = Split screen needed
-2. "screen_recording" without webcam = Full screen content needed  
-3. "talking_head" = Person fills the frame (>40% of screen), no screen content visible
+**SCREEN SHARE WITH WEBCAM** = Screen content is primary, with a SMALL person overlay:
+- Main content is: code, browser, slides, pricing tables, software UI, documents
+- There is a TINY webcam overlay (10-25% of screen) in a CORNER
+- The webcam shows just a face in a small box, NOT the main subject
+- Person is clearly IN A CORNER (top-left, top-right, bottom-left, bottom-right)
 
-CRITICAL: If you see a TABLE, CODE, BROWSER, SLIDES, or any UI content as the main focus, 
-that is "screen_recording" even if a person appears briefly.
+**SCREEN SHARE WITHOUT WEBCAM** = Only screen content, no person visible:
+- Just code, browser, slides, documents - no face at all
 
-Respond with ONLY this JSON (no markdown, no explanation):
-{"has_webcam_overlay": true, "webcam_position": "bottom-right", "main_content": "screen_recording", "confidence": 0.9, "reasoning": "Pricing table with small webcam in corner"}
+KEY RULE: If the person's face/body is the MAIN FOCUS of the frame (not in a corner), 
+that is ALWAYS "talking_head" even if there's a whiteboard behind them!
 
-OR:
-{"has_webcam_overlay": false, "webcam_position": null, "main_content": "screen_recording", "confidence": 0.9, "reasoning": "Browser showing pricing table, no webcam overlay"}
-
-OR:
-{"has_webcam_overlay": false, "webcam_position": null, "main_content": "talking_head", "confidence": 0.9, "reasoning": "Person fills frame talking to camera"}"""
+Respond with ONLY this JSON:
+{"has_webcam_overlay": boolean, "webcam_position": "bottom-right"|"bottom-left"|"top-right"|"top-left"|null, "main_content": "talking_head"|"screen_recording", "confidence": 0.9, "reasoning": "brief explanation"}"""
 
         client = await self._get_client()
         
@@ -423,11 +422,20 @@ OR:
             
             logger.info(f"VLM sampling {sample_count} frames for {duration_sec:.1f}s clip")
             
-            # Sample frames evenly throughout the clip
-            sample_times = [
-                start_ms + int(duration_ms * (i + 0.5) / sample_count)
-                for i in range(sample_count)
-            ]
+            # Sample frames INCLUDING start and end to catch boundary transitions
+            # First sample: 0.5s into clip (to avoid black/transition frames)
+            # Last sample: 0.5s before end
+            # Middle samples: evenly distributed
+            if sample_count == 1:
+                sample_times = [start_ms + duration_ms // 2]
+            else:
+                # First sample at ~500ms into clip, last sample at ~500ms before end
+                margin_ms = min(500, duration_ms // (sample_count * 2))
+                usable_duration = duration_ms - (2 * margin_ms)
+                sample_times = [
+                    start_ms + margin_ms + int(usable_duration * i / (sample_count - 1))
+                    for i in range(sample_count)
+                ]
             
             frame_results: list[VLMFrameResult] = []
             vlm_results = []
