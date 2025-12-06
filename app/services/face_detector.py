@@ -136,6 +136,41 @@ class FaceDetector:
         self._ready = len(detectors_loaded) > 0
         logger.info(f"Face detector ready with {len(detectors_loaded)} backends: {detectors_loaded}")
 
+    def _reset_mediapipe_detectors(self) -> None:
+        """
+        Reset MediaPipe detectors to handle timestamp errors in concurrent usage.
+        
+        MediaPipe's internal state can become corrupted when used concurrently,
+        causing "Packet timestamp mismatch" errors. Creating fresh instances resolves this.
+        """
+        try:
+            import mediapipe as mp
+            
+            # Close existing detectors if they have close methods
+            if self._mediapipe_detector is not None:
+                try:
+                    self._mediapipe_detector.close()
+                except Exception:
+                    pass
+            if self._mediapipe_detector_fullrange is not None:
+                try:
+                    self._mediapipe_detector_fullrange.close()
+                except Exception:
+                    pass
+            
+            # Create fresh instances
+            self._mediapipe_detector = mp.solutions.face_detection.FaceDetection(
+                model_selection=0,
+                min_detection_confidence=self.confidence_threshold,
+            )
+            self._mediapipe_detector_fullrange = mp.solutions.face_detection.FaceDetection(
+                model_selection=1,
+                min_detection_confidence=max(0.3, self.confidence_threshold - 0.2),
+            )
+            logger.debug("MediaPipe detectors reset successfully")
+        except Exception as e:
+            logger.warning(f"Failed to reset MediaPipe detectors: {e}")
+
     def is_ready(self) -> bool:
         """Check if at least one detector is ready."""
         return self._ready
@@ -165,24 +200,53 @@ class FaceDetector:
         height, width = image.shape[:2]
         frame_area = width * height
         detections = []
+        short_range_detections = []
+        full_range_detections = []
 
+        # Run BOTH MediaPipe detectors and merge results
+        # This catches both large center faces AND small corner webcams
+        
         # Try MediaPipe short-range first (best for close faces)
-        if self._mediapipe_detector is not None and not detections:
+        if self._mediapipe_detector is not None:
             try:
-                detections = self._detect_with_mediapipe(image, width, height, use_fullrange=False)
-                if detections:
-                    logger.debug(f"MediaPipe short-range detected {len(detections)} faces")
+                short_range_detections = self._detect_with_mediapipe(image, width, height, use_fullrange=False)
+                if short_range_detections:
+                    logger.debug(f"MediaPipe short-range detected {len(short_range_detections)} faces")
             except Exception as e:
-                logger.warning(f"MediaPipe short-range detection failed: {e}")
+                # MediaPipe timestamp error often happens with concurrent usage
+                # Reset detector and try again with fresh instance
+                if "timestamp" in str(e).lower():
+                    logger.debug("MediaPipe short-range timestamp error, recreating detector...")
+                    self._reset_mediapipe_detectors()
+                    try:
+                        short_range_detections = self._detect_with_mediapipe(image, width, height, use_fullrange=False)
+                    except Exception:
+                        pass  # Fall through to other detectors
+                else:
+                    logger.warning(f"MediaPipe short-range detection failed: {e}")
 
-        # Try MediaPipe full-range if short-range found nothing (better for small webcam faces)
-        if self._mediapipe_detector_fullrange is not None and not detections:
+        # ALWAYS try full-range for small/distant faces (like corner webcam overlays)
+        # Even if short-range found faces, we need full-range for small webcams
+        if self._mediapipe_detector_fullrange is not None:
             try:
-                detections = self._detect_with_mediapipe(image, width, height, use_fullrange=True)
-                if detections:
-                    logger.debug(f"MediaPipe full-range detected {len(detections)} faces")
+                full_range_detections = self._detect_with_mediapipe(image, width, height, use_fullrange=True)
+                if full_range_detections:
+                    logger.debug(f"MediaPipe full-range detected {len(full_range_detections)} faces")
             except Exception as e:
-                logger.warning(f"MediaPipe full-range detection failed: {e}")
+                if "timestamp" in str(e).lower():
+                    logger.debug("MediaPipe full-range timestamp error, recreating detector...")
+                    self._reset_mediapipe_detectors()
+                    try:
+                        full_range_detections = self._detect_with_mediapipe(image, width, height, use_fullrange=True)
+                    except Exception:
+                        pass  # Fall through to other detectors
+                else:
+                    logger.warning(f"MediaPipe full-range detection failed: {e}")
+        
+        # Merge detections from both models, removing duplicates
+        detections = self._merge_detections(short_range_detections, full_range_detections, width, height)
+        if detections:
+            logger.debug(f"MediaPipe merged: {len(detections)} unique faces from {len(short_range_detections)} short-range + {len(full_range_detections)} full-range")
 
         # Try OpenCV DNN if still nothing
         if self._dnn_net is not None and not detections:
@@ -345,6 +409,104 @@ class FaceDetector:
                 logger.debug(f"Filtered face with area ratio {ratio:.3f} (bounds: {self.MIN_FACE_AREA_RATIO}-{self.MAX_FACE_AREA_RATIO})")
         
         return filtered
+
+    def _merge_detections(
+        self,
+        short_range: List[FaceDetectionResult],
+        full_range: List[FaceDetectionResult],
+        frame_width: int,
+        frame_height: int,
+    ) -> List[FaceDetectionResult]:
+        """
+        Merge face detections from short-range and full-range MediaPipe models.
+        
+        Removes duplicates by checking for overlapping bounding boxes.
+        Keeps the detection with higher confidence when faces overlap.
+        
+        This is critical for detecting both:
+        - Large center faces (short-range is better)
+        - Small corner webcam faces (full-range is better)
+        
+        Args:
+            short_range: Detections from short-range model (close faces)
+            full_range: Detections from full-range model (distant/small faces)
+            frame_width: Frame width for IoU calculation
+            frame_height: Frame height for IoU calculation
+            
+        Returns:
+            Merged list with duplicates removed
+        """
+        if not full_range:
+            return short_range
+        if not short_range:
+            return full_range
+        
+        # Start with all short-range detections (typically higher quality for close faces)
+        merged = list(short_range)
+        
+        # Add full-range detections that don't overlap significantly with short-range
+        for fr_det in full_range:
+            is_duplicate = False
+            fr_x, fr_y, fr_w, fr_h = fr_det.bbox
+            
+            for sr_det in short_range:
+                sr_x, sr_y, sr_w, sr_h = sr_det.bbox
+                
+                # Calculate IoU (Intersection over Union)
+                iou = self._calculate_iou(
+                    (fr_x, fr_y, fr_w, fr_h),
+                    (sr_x, sr_y, sr_w, sr_h)
+                )
+                
+                # If significant overlap (IoU > 0.3), consider it a duplicate
+                if iou > 0.3:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                merged.append(fr_det)
+                logger.debug(f"Added full-range face detection: {fr_det.bbox} (not overlapping with short-range)")
+        
+        return merged
+
+    def _calculate_iou(
+        self,
+        box1: Tuple[int, int, int, int],
+        box2: Tuple[int, int, int, int],
+    ) -> float:
+        """
+        Calculate Intersection over Union between two bounding boxes.
+        
+        Args:
+            box1: First box as (x, y, width, height)
+            box2: Second box as (x, y, width, height)
+            
+        Returns:
+            IoU value between 0 and 1
+        """
+        x1, y1, w1, h1 = box1
+        x2, y2, w2, h2 = box2
+        
+        # Calculate intersection
+        xi1 = max(x1, x2)
+        yi1 = max(y1, y2)
+        xi2 = min(x1 + w1, x2 + w2)
+        yi2 = min(y1 + h1, y2 + h2)
+        
+        if xi2 <= xi1 or yi2 <= yi1:
+            return 0.0
+        
+        intersection = (xi2 - xi1) * (yi2 - yi1)
+        
+        # Calculate union
+        area1 = w1 * h1
+        area2 = w2 * h2
+        union = area1 + area2 - intersection
+        
+        if union <= 0:
+            return 0.0
+        
+        return intersection / union
 
     def filter_outliers(
         self,

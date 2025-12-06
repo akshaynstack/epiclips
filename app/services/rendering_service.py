@@ -65,6 +65,10 @@ class RenderRequest:
     # Embedded facecam flag - if True, video already has PiP facecam
     # In this case, we should NOT do split screen to avoid duplicating the face
     has_embedded_facecam: bool = False
+    
+    # Corner facecam bbox (x, y, w, h) - for split screen layouts
+    # This tells the renderer WHERE the corner webcam is, so it crops that instead of main face
+    corner_facecam_bbox: Optional[tuple[int, int, int, int]] = None
 
 
 @dataclass
@@ -264,6 +268,7 @@ class RenderingService:
             )
 
             # Pass 2: Render tight face crop (BOTTOM 50%)
+            # Use corner_facecam_bbox if available - this is the ACTUAL webcam position
             logger.debug("Pass 2: Rendering face crop (bottom)...")
             await self._render_split_face(
                 input_path=request.video_path,
@@ -273,6 +278,7 @@ class RenderingService:
                 target_height=face_height,
                 start_time_ms=request.start_time_ms,
                 duration_ms=duration_ms,
+                corner_facecam_bbox=request.corner_facecam_bbox,
             )
 
             # Pass 3: Merge 2 regions with vstack and overlay captions
@@ -379,35 +385,31 @@ class RenderingService:
         """
         Render screen content for split layout (top region).
 
-        For screen share content, we want to capture the main screen area
-        (typically center of frame) and scale it to fill the top region.
+        For screen share content, we take a 1:1 SQUARE CENTERED crop
+        from the screen content area, then scale it to fill the top region.
         
-        Strategy: Take a crop from the CENTER of the frame that matches
-        the target aspect ratio, then scale to fit.
+        Strategy: 
+        1. Take a 1:1 square crop from CENTER of frame (screen content)
+        2. Scale it to target width x target height for the top region
         """
         source_w = timeline.source_width
         source_h = timeline.source_height
 
-        # Calculate the aspect ratio we need for the target region
-        target_aspect = target_width / target_height  # e.g., 1080/960 = 1.125
-
-        # Calculate crop dimensions that match target aspect ratio
-        # and fit within the source frame
-        if source_w / source_h > target_aspect:
-            # Source is wider than target - crop width, use full height
-            crop_height = source_h
-            crop_width = int(source_h * target_aspect)
-        else:
-            # Source is taller than target - crop height, use full width
-            crop_width = source_w
-            crop_height = int(source_w / target_aspect)
-
-        # Center the crop in the frame
-        crop_x = (source_w - crop_width) // 2
-        crop_y = (source_h - crop_height) // 2
-
-        # Bias toward top for screen content (UI usually at top)
-        crop_y = max(0, crop_y - int(crop_height * 0.1))
+        # Take a 1:1 SQUARE crop centered in the frame
+        # The square size should be the smaller of width/height to fit
+        # But we want to crop from screen area (not include corner facecam)
+        # So we use ~70% of frame height to avoid webcam region
+        screen_region_height = int(source_h * 0.70)
+        
+        # Square crop size - use screen region height to ensure we get screen content
+        square_size = min(source_w, screen_region_height)
+        
+        # Center the square crop horizontally, position at top vertically
+        crop_x = (source_w - square_size) // 2
+        crop_y = 0  # Start from top
+        
+        crop_width = square_size
+        crop_height = square_size
 
         # Ensure bounds
         crop_x = max(0, min(crop_x, source_w - crop_width))
@@ -415,14 +417,16 @@ class RenderingService:
 
         logger.info(
             f"Split SCREEN crop: source={source_w}x{source_h}, "
-            f"crop {crop_width}x{crop_height} at ({crop_x}, {crop_y}) "
+            f"1:1 square={square_size}x{square_size} at ({crop_x}, {crop_y}) "
             f"-> scale to {target_width}x{target_height}"
         )
 
-        # Crop center region, then scale to target dimensions
+        # Crop 1:1 square from center-top, then scale to target dimensions
+        # Use force_original_aspect_ratio=disable to ensure exact fill
         filters = [
             f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
-            f"scale={target_width}:{target_height}",
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=disable",
+            f"setsar=1",  # Ensure square pixels
         ]
 
         await self._run_ffmpeg(
@@ -443,66 +447,153 @@ class RenderingService:
         target_height: int,
         start_time_ms: int,
         duration_ms: int,
+        corner_facecam_bbox: Optional[tuple[int, int, int, int]] = None,
     ) -> None:
         """
         Render face crop for split layout (bottom region).
 
-        Creates a crop around the detected face position that matches
-        the target aspect ratio, then scales to fill the bottom region.
+        For screen recordings with webcam overlays:
+        - The webcam is typically a SMALL box in a corner
+        - We crop that region and SCALE UP to fill the entire bottom portion
+        
+        Strategy:
+        1. Use corner_facecam_bbox if available (from smart layout detector)
+        2. Otherwise fallback to timeline keyframes (which may have wrong face)
+        3. Crop a rectangle around the face matching target aspect ratio
+        4. Scale it up to fill the entire bottom half (1080x960)
         """
-        keyframes = timeline.keyframes
-
-        # Calculate weighted average position from keyframes (face center)
-        avg_center_x = sum(k.center_x for k in keyframes) / len(keyframes)
-        avg_center_y = sum(k.center_y for k in keyframes) / len(keyframes)
-
         source_w = timeline.source_width
         source_h = timeline.source_height
-
-        # Calculate crop dimensions that match target aspect ratio
-        target_aspect = target_width / target_height  # e.g., 1080/960 = 1.125
-
-        # Use the window size from timeline as base, but ensure aspect ratio matches
-        base_size = max(timeline.window_width, timeline.window_height)
-        base_size = max(base_size, 300)  # Minimum for quality
         
-        # Calculate crop dimensions matching target aspect
-        if target_aspect >= 1:
-            # Wider than tall
-            crop_width = base_size
-            crop_height = int(base_size / target_aspect)
+        # PRIORITY: Use corner_facecam_bbox from smart layout detector
+        # This is the ACTUAL webcam overlay position, not the main face
+        if corner_facecam_bbox:
+            bbox_x, bbox_y, bbox_w, bbox_h = corner_facecam_bbox
+            avg_center_x = bbox_x + bbox_w / 2
+            avg_center_y = bbox_y + bbox_h / 2
+            webcam_size = max(bbox_w, bbox_h)
+            logger.info(
+                f"Using corner facecam bbox: ({bbox_x}, {bbox_y}, {bbox_w}x{bbox_h}), "
+                f"center=({avg_center_x:.0f}, {avg_center_y:.0f})"
+            )
         else:
-            # Taller than wide
+            # Fallback: Use keyframes (may be wrong if it detected main face)
+            keyframes = timeline.keyframes
+            avg_center_x = sum(k.center_x for k in keyframes) / len(keyframes)
+            avg_center_y = sum(k.center_y for k in keyframes) / len(keyframes)
+            
+            # Estimate webcam size from timeline
+            webcam_size = max(timeline.window_width, timeline.window_height)
+            logger.warning(
+                f"No corner_facecam_bbox available, using timeline keyframes: "
+                f"center=({avg_center_x:.0f}, {avg_center_y:.0f})"
+            )
+
+        # Don't validate webcam_size from corner_facecam_bbox - trust the detection
+        # Only apply defaults when we don't have corner_facecam_bbox
+        if not corner_facecam_bbox:
+            max_webcam_size = int(min(source_w, source_h) * 0.40)
+            min_webcam_size = int(min(source_w, source_h) * 0.10)
+            
+            if webcam_size > max_webcam_size or webcam_size < min_webcam_size:
+                # Use default webcam overlay size estimate
+                webcam_size = int(min(source_w, source_h) * 0.25)
+        
+        # TIGHT FACE CROP: Use the timeline's window dimensions which are based on
+        # actual detected face size, NOT the webcam overlay size
+        # The timeline.window_width/height come from face detection in ai_clipping_pipeline
+        target_aspect = target_width / target_height  # e.g., 1080/960 = 1.125
+        
+        # PRIORITY 1: Use timeline dimensions if they represent actual face detection
+        # Timeline window dimensions are calculated as 2x the average face size
+        timeline_based_size = max(timeline.window_width, timeline.window_height)
+        
+        # Only use timeline dimensions if they're reasonable (actual face detection)
+        # Face-based timeline will have window < 400px typically
+        # Webcam overlay-based will be larger
+        if timeline_based_size > 0 and timeline_based_size < source_h * 0.4:
+            # Timeline has actual face-based dimensions - use them directly
+            base_size = timeline_based_size
+            logger.info(f"Using timeline-based face crop: {base_size}px (from detected faces)")
+        else:
+            # Fallback: Calculate from webcam size with tight padding
+            tight_padding = 1.2
+            base_size = int(webcam_size * tight_padding)
+            logger.info(f"Using webcam-based crop: webcam={webcam_size}, base_size={base_size}")
+        
+        # Minimum base_size for quality (at least 200px to avoid excessive pixelation)
+        base_size = max(base_size, 200)
+        
+        # Maximum base_size - cap at 360px for aggressive zoom on face
+        # This ensures face truly FILLS the output
+        base_size = min(base_size, 360)
+        
+        # Calculate crop dimensions matching target aspect ratio
+        # The crop should be SMALL so when scaled up, face fills the output
+        if target_aspect >= 1:
+            # Output is wider than tall (1080x960 = 1.125 aspect)
             crop_height = base_size
             crop_width = int(base_size * target_aspect)
+        else:
+            # Output is taller than wide  
+            crop_width = base_size
+            crop_height = int(base_size / target_aspect)
+        
+        # Ensure minimum crop for quality (at least 150px in each dimension)
+        min_crop = 150
+        if crop_width < min_crop:
+            scale_factor = min_crop / crop_width
+            crop_width = min_crop
+            crop_height = int(crop_height * scale_factor)
+        if crop_height < min_crop:
+            scale_factor = min_crop / crop_height
+            crop_height = min_crop
+            crop_width = int(crop_width * scale_factor)
+        
+        # Ensure crop fits in frame
+        crop_width = min(crop_width, source_w)
+        crop_height = min(crop_height, source_h)
+        
+        # Position the crop centered on the detected face/webcam
+        # If we have corner_facecam_bbox, trust it completely
+        if corner_facecam_bbox:
+            # We have explicit corner facecam position - use it directly
+            crop_x = int(avg_center_x - crop_width / 2)
+            crop_y = int(avg_center_y - crop_height / 2)
+        elif avg_center_y > source_h * 0.3:
+            # Face is in lower 70% of frame - use it
+            crop_x = int(avg_center_x - crop_width / 2)
+            crop_y = int(avg_center_y - crop_height / 2)
+        else:
+            # Face detection probably got screen content (face in top 30%)
+            # Default to bottom-right corner where webcam typically is
+            crop_x = source_w - crop_width - 20  # 20px margin from edge
+            crop_y = source_h - crop_height - 20
+            logger.warning(
+                f"Face center ({avg_center_x:.0f}, {avg_center_y:.0f}) is in top 30% "
+                f"- using bottom-right corner fallback for webcam"
+            )
 
-        # Ensure crop fits in source
-        if crop_width > source_w:
-            crop_width = source_w
-            crop_height = int(crop_width / target_aspect)
-        if crop_height > source_h:
-            crop_height = source_h
-            crop_width = int(crop_height * target_aspect)
-
-        # Center the crop on the face position
-        crop_x = int(avg_center_x - crop_width / 2)
-        crop_y = int(avg_center_y - crop_height / 2)
-
-        # Ensure bounds
+        # Ensure bounds (keep crop in frame)
         crop_x = max(0, min(crop_x, source_w - crop_width))
         crop_y = max(0, min(crop_y, source_h - crop_height))
 
         logger.info(
             f"Split FACE crop: source={source_w}x{source_h}, "
+            f"webcam_size={webcam_size}, base_size={base_size}, "
             f"face_center=({avg_center_x:.0f}, {avg_center_y:.0f}), "
             f"crop={crop_width}x{crop_height} at ({crop_x}, {crop_y}) "
             f"-> scale to {target_width}x{target_height}"
         )
 
-        # Crop around face, then scale to target dimensions
+        # Crop around face region, then scale to target dimensions
+        # This scales the small webcam up to FILL the entire bottom region
+        # Use scale with force_original_aspect_ratio=disable to ensure exact fill
+        # Then pad to ensure exact dimensions if needed
         filters = [
             f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
-            f"scale={target_width}:{target_height}",
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=disable",
+            f"setsar=1",  # Ensure square pixels
         ]
 
         await self._run_ffmpeg(
@@ -676,7 +767,11 @@ class RenderingService:
         timeline = request.primary_timeline
         assert timeline is not None
         
-        logger.debug(f"Focus mode render: {len(timeline.keyframes)} keyframes")
+        logger.info(
+            f"Focus mode render: {len(timeline.keyframes)} keyframes, "
+            f"crop {timeline.window_width}x{timeline.window_height} -> "
+            f"{self.settings.target_output_width}x{self.settings.target_output_height}"
+        )
         
         # Build crop expression
         crop_expr = self._build_crop_expression(

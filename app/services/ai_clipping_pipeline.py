@@ -19,6 +19,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -166,6 +167,97 @@ class AIClippingPipeline:
         self._current_callback_url: Optional[str] = None
         self._current_external_job_id: Optional[str] = None
         self._current_owner_user_id: Optional[str] = None
+        
+        # Job-specific file handler for logging
+        self._job_log_handler: Optional[logging.FileHandler] = None
+
+    def _setup_job_logging(self, job_id: str) -> Optional[logging.FileHandler]:
+        """
+        Set up job-specific file logging.
+        
+        Creates a log file in the logs folder for this specific job.
+        All log messages from app.services.* will be written to this file.
+        
+        Args:
+            job_id: The job ID to use for the log filename
+            
+        Returns:
+            The file handler (to be removed later) or None if setup fails
+        """
+        try:
+            # Create logs directory if it doesn't exist
+            logs_dir = Path("logs")
+            logs_dir.mkdir(exist_ok=True)
+            
+            # Create log file with job_id and timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_filename = logs_dir / f"job_{job_id}_{timestamp}.log"
+            
+            # Create file handler with detailed formatting
+            file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+            file_handler.setLevel(logging.DEBUG)
+            
+            # Detailed format for file logs
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            file_handler.setFormatter(formatter)
+            
+            # Add handler to the root logger to capture all app.services.* logs
+            root_logger = logging.getLogger()
+            root_logger.addHandler(file_handler)
+            
+            # Also add to specific service loggers for better coverage
+            service_loggers = [
+                'app.services.ai_clipping_pipeline',
+                'app.services.smart_layout_detector',
+                'app.services.rendering_service',
+                'app.services.detection_pipeline',
+                'app.services.transcription_service',
+                'app.services.intelligence_planner',
+                'app.services.video_downloader',
+                'app.services.s3_upload_service',
+            ]
+            for logger_name in service_loggers:
+                logging.getLogger(logger_name).addHandler(file_handler)
+            
+            logger.info(f"Job logging initialized: {log_filename}")
+            return file_handler
+            
+        except Exception as e:
+            logger.warning(f"Failed to setup job logging: {e}")
+            return None
+    
+    def _cleanup_job_logging(self, file_handler: Optional[logging.FileHandler]):
+        """Remove the job-specific file handler from all loggers."""
+        if file_handler is None:
+            return
+            
+        try:
+            # Remove from root logger
+            root_logger = logging.getLogger()
+            root_logger.removeHandler(file_handler)
+            
+            # Remove from service loggers
+            service_loggers = [
+                'app.services.ai_clipping_pipeline',
+                'app.services.smart_layout_detector',
+                'app.services.rendering_service',
+                'app.services.detection_pipeline',
+                'app.services.transcription_service',
+                'app.services.intelligence_planner',
+                'app.services.video_downloader',
+                'app.services.s3_upload_service',
+            ]
+            for logger_name in service_loggers:
+                logging.getLogger(logger_name).removeHandler(file_handler)
+            
+            # Close the file handler
+            file_handler.close()
+            
+        except Exception as e:
+            logger.warning(f"Failed to cleanup job logging: {e}")
 
     async def process_video(
         self,
@@ -188,10 +280,16 @@ class AIClippingPipeline:
         self._current_callback_url = request.callback_url
         self._current_external_job_id = request.external_job_id
         self._current_owner_user_id = request.owner_user_id
+        
+        # Set up job-specific file logging
+        job_log_handler = self._setup_job_logging(job_id)
 
         try:
             os.makedirs(work_dir, exist_ok=True)
             logger.info(f"Starting AI clipping job: {job_id}")
+            logger.info(f"Video URL: {request.video_url}")
+            logger.info(f"Max clips: {request.max_clips}, Duration ranges: {request.duration_ranges}")
+            logger.info(f"Layout type: {request.layout_type}, Include captions: {request.include_captions}")
             logger.info(f"Webhook callback URL: {self._current_callback_url or 'NOT SET'}")
             
             # Step 1: Download video
@@ -248,7 +346,7 @@ class AIClippingPipeline:
                 user_id=request.owner_user_id,
             )
             
-            # Step 4: Run detection for smart cropping
+            # Step 4: Run detection for smart cropping (with speaker-driven layout)
             self._update_progress(job_id, JobStatus.DETECTING, 45, "Analyzing video for smart cropping...")
             detection_results = await self._run_detection_for_clips(
                 video_path=download_result.video_path,
@@ -256,6 +354,8 @@ class AIClippingPipeline:
                 source_width=download_result.metadata.width,
                 source_height=download_result.metadata.height,
                 layout_type=request.layout_type,  # Pass user's layout choice (auto, split_screen, talking_head)
+                transcript_segments=transcription_result.segments,  # Pass for speaker diarization
+                enable_speaker_driven_layout=True,  # Use active speaker detection for layout
             )
             logger.info("Detection analysis complete")
             
@@ -358,9 +458,16 @@ class AIClippingPipeline:
                         # DISABLED: has_embedded_facecam detection was blocking split screen
                         # Always set to False - we want split screen for face + screen content
                         has_embedded = False  # layout_analysis.has_embedded_facecam if layout_analysis else False
+                        
+                        # Get corner facecam bbox for proper face cropping in split screen
+                        corner_facecam_bbox = None
+                        if layout_analysis and layout_analysis.corner_facecam_bbox:
+                            corner_facecam_bbox = layout_analysis.corner_facecam_bbox
+                        
                         logger.info(
                             f"Clip {i + 1} render config: layout={effective_layout}, "
-                            f"has_embedded_facecam={has_embedded} (disabled)"
+                            f"has_embedded_facecam={has_embedded} (disabled), "
+                            f"corner_facecam_bbox={corner_facecam_bbox}"
                         )
                         
                         render_request = RenderRequest(
@@ -376,6 +483,7 @@ class AIClippingPipeline:
                             transcript_segments=clip_transcript if request.include_captions else None,
                             caption_style=adjusted_caption_style,
                             has_embedded_facecam=has_embedded,
+                            corner_facecam_bbox=corner_facecam_bbox,
                         )
                         
                         render_result = await self.rendering_service.render_clip(render_request)
@@ -525,6 +633,9 @@ class AIClippingPipeline:
             self._current_callback_url = None
             self._current_external_job_id = None
             self._current_owner_user_id = None
+            
+            # Cleanup job-specific logging
+            self._cleanup_job_logging(job_log_handler)
 
     async def _run_detection_for_clips(
         self,
@@ -533,6 +644,8 @@ class AIClippingPipeline:
         source_width: int,
         source_height: int,
         layout_type: str = "auto",
+        transcript_segments: Optional[list] = None,
+        enable_speaker_driven_layout: bool = True,
     ) -> dict[int, dict]:
         """
         Run detection pipeline and layout analysis for each planned clip segment IN PARALLEL.
@@ -550,6 +663,8 @@ class AIClippingPipeline:
             layout_type: User-requested layout type:
                 - "auto": Run SmartLayoutDetector to detect transitions
                 - "split_screen"/"talking_head": Force this layout, skip transition detection
+            transcript_segments: Optional transcript segments for speaker diarization
+            enable_speaker_driven_layout: Whether to use speaker-driven layout (recommended)
 
         Note: Detection is run for ALL layout types to enable smart cropping:
         - talking_head: Uses face detection for dynamic panning
@@ -558,6 +673,12 @@ class AIClippingPipeline:
         Layout analysis enables dynamic layout switching within clips by:
         - Detecting layout transitions (talking_head <-> screen_share)
         - Creating layout segments for per-segment rendering
+        
+        NEW: Speaker-driven layout mode (when enable_speaker_driven_layout=True)
+        - Uses active speaker detection instead of face count
+        - SINGLE (talking_head) when only one speaker is active
+        - SPLIT (screen_share) only when 2+ speakers are active
+        - Background faces (< 2% speaking time) are ignored
         """
         use_auto_layout = layout_type == "auto"
         
@@ -576,21 +697,50 @@ class AIClippingPipeline:
                 logger.info(f"Detection for clip {i} ({segment.layout_type}): {len(detection_frames)} frames")
 
                 if use_auto_layout:
-                    # AUTO mode: Run SmartLayoutDetector to detect transitions within the clip
-                    layout_analysis = await self.smart_layout_detector.analyze_clip_layout(
-                        video_path=video_path,
-                        start_ms=segment.start_time_ms,
-                        end_ms=segment.end_time_ms,
-                        face_detections=detection_frames,
-                        sample_fps=2.0,  # Sample at 2 FPS for layout analysis
-                    )
+                    # AUTO mode: Use speaker-driven layout if available, else fall back to frame analysis
+                    if enable_speaker_driven_layout and hasattr(self.smart_layout_detector, 'analyze_clip_layout_with_speakers'):
+                        # NEW: Speaker-driven layout detection
+                        # - SINGLE (talking_head) when only one speaker is active
+                        # - SPLIT (screen_share) only when 2+ speakers are active
+                        # - Background faces are ignored
+                        layout_analysis = await self.smart_layout_detector.analyze_clip_layout_with_speakers(
+                            video_path=video_path,
+                            start_ms=segment.start_time_ms,
+                            end_ms=segment.end_time_ms,
+                            face_detections=detection_frames,
+                            transcript_segments=transcript_segments,
+                            frame_width=source_width,
+                            frame_height=source_height,
+                            sample_fps=2.0,
+                        )
+                        
+                        logger.info(
+                            f"Speaker-driven layout for clip {i}: "
+                            f"has_transitions={layout_analysis.has_transitions}, "
+                            f"segments={layout_analysis.segment_count}, "
+                            f"dominant={layout_analysis.dominant_layout}, "
+                            f"active_speakers={layout_analysis.active_speaker_count}"
+                        )
+                        
+                        # NOTE: We trust the frame-by-frame analysis for layout transitions.
+                        # The AI planner's suggestion is only used as context, not as override.
+                        # This allows dynamic layout switching within clips.
+                    else:
+                        # Fallback to frame-based layout analysis
+                        layout_analysis = await self.smart_layout_detector.analyze_clip_layout(
+                            video_path=video_path,
+                            start_ms=segment.start_time_ms,
+                            end_ms=segment.end_time_ms,
+                            face_detections=detection_frames,
+                            sample_fps=2.0,  # Sample at 2 FPS for layout analysis
+                        )
 
-                    logger.info(
-                        f"Layout analysis for clip {i}: "
-                        f"has_transitions={layout_analysis.has_transitions}, "
-                        f"segments={layout_analysis.segment_count}, "
-                        f"dominant={layout_analysis.dominant_layout}"
-                    )
+                        logger.info(
+                            f"Layout analysis for clip {i}: "
+                            f"has_transitions={layout_analysis.has_transitions}, "
+                            f"segments={layout_analysis.segment_count}, "
+                            f"dominant={layout_analysis.dominant_layout}"
+                        )
                 else:
                     # EXPLICIT mode: User specified a layout, force it for entire clip
                     # Map split_screen -> screen_share for rendering compatibility
@@ -664,10 +814,9 @@ class AIClippingPipeline:
         """
         Build a crop timeline from detection results for face tracking.
 
-        Build crop timeline for face tracking:
-        - For talking_head: Full 9:16 crop window following face
-        - For screen_share: Tight crop around face for bottom region
-        - Simple fallback to center-bottom when no faces detected
+        SIMPLIFIED LOGIC:
+        - For talking_head: 9:16 crop CENTERED on frame (no face tracking needed)
+        - For screen_share: Tight crop for face region (corner_facecam_bbox handles position)
         
         Args:
             effective_layout: Override layout type from smart detector (takes priority over segment.layout_type)
@@ -678,8 +827,8 @@ class AIClippingPipeline:
         # Calculate crop window based on layout type
         if layout_type == "screen_share":
             # For screen_share: tight crop around face for close-up effect
+            # The actual position comes from corner_facecam_bbox in the renderer
             face_output_height = int(self.settings.target_output_height * self.settings.split_face_ratio)
-            face_crop_aspect = self.settings.target_output_width / face_output_height
 
             # Calculate face size from detections
             face_areas = []
@@ -698,30 +847,27 @@ class AIClippingPipeline:
                 avg_face_size = int(avg_face_area ** 0.5)
 
                 # Create TIGHT crop: 2x face size
-                # This smaller crop will scale UP dramatically to fill the bottom region
                 face_crop_size = avg_face_size * 2
 
                 # Ensure minimum reasonable size (face + context)
-                min_crop = min(source_width, source_height) // 4  # 1/4 of frame
+                min_crop = min(source_width, source_height) // 4
                 face_crop_size = max(face_crop_size, min_crop)
 
                 # Cap at 1/3 of source to ensure good scale-up
                 max_crop = min(source_width, source_height) // 3
                 face_crop_size = min(face_crop_size, max_crop)
 
-                # Make window square for best scaling
                 window_height = face_crop_size
-                window_width = face_crop_size  # Keep square for clean scale-up
+                window_width = face_crop_size
 
                 logger.info(f"Face crop (tight): avg_face_size={avg_face_size}, crop={face_crop_size}x{face_crop_size}")
             else:
-                # Fallback: smaller crop from center-bottom for better scale-up
-                # Use 1/3 of height to ensure it scales up to fill
                 window_height = source_height // 3
-                window_width = window_height  # Keep square
-                logger.info(f"No faces - using center-bottom fallback: window={window_width}x{window_height}")
+                window_width = window_height
+                logger.info(f"No faces - using fallback crop: window={window_width}x{window_height}")
         else:
-            # For talking_head: standard 9:16 crop
+            # For talking_head: standard 9:16 crop CENTERED on frame
+            # No face tracking - just center the crop horizontally
             target_aspect = 9 / 16
             if source_width / source_height > target_aspect:
                 window_height = source_height
@@ -731,6 +877,84 @@ class AIClippingPipeline:
                 window_height = int(source_width / target_aspect)
             logger.info(f"Talking head crop: {window_width}x{window_height} (9:16 from {source_width}x{source_height})")
         
+        # For talking_head: Track face position to center crop on the face
+        # This is important when transitioning from webcam overlay to full-screen talking head
+        if layout_type != "screen_share":
+            # Try to find faces in the detection frames
+            face_positions = []
+            frame_area = source_width * source_height
+            
+            if detection_frames:
+                for frame in detection_frames:
+                    faces = frame.get("detections", [])
+                    for face in faces:
+                        bbox = face.get("bbox", {})
+                        face_w = bbox.get("width", 0)
+                        face_h = bbox.get("height", 0)
+                        face_x = bbox.get("x", 0)
+                        face_y = bbox.get("y", 0)
+                        face_area = face_w * face_h
+                        
+                        # For talking_head, we want the MAIN visible face
+                        # Accept faces that are 1% - 80% of frame area
+                        area_ratio = face_area / frame_area if frame_area > 0 else 0
+                        if area_ratio < 0.01 or area_ratio > 0.80:
+                            continue
+                            
+                        face_center_x = face_x + face_w // 2
+                        face_center_y = face_y + face_h // 2
+                        confidence = face.get("confidence", 0.5)
+                        
+                        face_positions.append({
+                            "x": face_center_x,
+                            "y": face_center_y,
+                            "weight": confidence * face_area,
+                        })
+            
+            if face_positions:
+                # Calculate weighted average face position
+                total_weight = sum(p["weight"] for p in face_positions)
+                if total_weight > 0:
+                    avg_x = sum(p["x"] * p["weight"] for p in face_positions) / total_weight
+                    avg_y = sum(p["y"] * p["weight"] for p in face_positions) / total_weight
+                    center_x = int(avg_x)
+                    center_y = int(avg_y)
+                    logger.info(f"Talking head: using FACE position ({center_x}, {center_y}) from {len(face_positions)} detections")
+                else:
+                    center_x = source_width // 2
+                    center_y = source_height // 2
+                    logger.info(f"Talking head: using CENTER position ({center_x}, {center_y}) - no valid face weights")
+            else:
+                # No faces found - fallback to center
+                center_x = source_width // 2
+                center_y = source_height // 2
+                logger.info(f"Talking head: using CENTER position ({center_x}, {center_y}) - no faces detected")
+            
+            # Clamp center position to ensure crop stays within frame
+            half_width = window_width // 2
+            half_height = window_height // 2
+            center_x = max(half_width, min(center_x, source_width - half_width))
+            center_y = max(half_height, min(center_y, source_height - half_height))
+            
+            # Create a single keyframe at face position
+            keyframes = [
+                CropKeyframe(
+                    timestamp_ms=segment.start_time_ms,
+                    center_x=center_x,
+                    center_y=center_y,
+                )
+            ]
+            
+            return CropTimeline(
+                window_width=window_width,
+                window_height=window_height,
+                source_width=source_width,
+                source_height=source_height,
+                keyframes=keyframes,
+            )
+        
+        # For screen_share: collect face positions for the corner webcam region
+        # (The actual bbox comes from corner_facecam_bbox in the renderer)
         frame_area = source_width * source_height
         
         # Collect raw face positions using WEIGHTED AVERAGE
@@ -742,7 +966,6 @@ class AIClippingPipeline:
             
             if faces:
                 # Calculate weighted average position using confidence × area
-                # This prioritizes large, high-confidence faces over small/uncertain ones
                 total_weight = 0.0
                 weighted_x = 0.0
                 weighted_y = 0.0
@@ -752,90 +975,55 @@ class AIClippingPipeline:
                     confidence = face.get("confidence", 0.5)
                     face_w = bbox.get("width", 0)
                     face_h = bbox.get("height", 0)
+                    face_x = bbox.get("x", 0)
+                    face_y = bbox.get("y", 0)
                     face_area = face_w * face_h
-
-                    # Skip very small faces (likely false positives)
-                    # For screen_share layouts, use a much lower threshold since
-                    # webcam faces in corners are typically small (< 5% of frame)
-                    area_ratio = face_area / frame_area if frame_area > 0 else 0
-                    if layout_type == "screen_share":
-                        # Screen share: accept smaller faces (webcams in corners)
-                        # Minimum: 0.1% of frame, Maximum: 20% (if larger, it's talking_head)
-                        if area_ratio < 0.001 or area_ratio > 0.20:
-                            continue
-                    else:
-                        # Talking head: faces should be prominent
-                        if area_ratio < 0.005 or area_ratio > 0.30:
-                            continue
-
-                    # Weight = confidence × area (multiplicative weighting)
-                    weight = confidence * face_area
                     
-                    center_x = bbox.get("x", 0) + face_w / 2
-                    center_y = bbox.get("y", 0) + face_h / 2
+                    # For screen_share: ONLY use faces in the CAMERA region (bottom 70%)
+                    face_center_y_ratio = (face_y + face_h / 2) / source_height
+                    if face_center_y_ratio < 0.30:
+                        continue  # Skip faces in screen region
+
+                    # Accept small webcam faces (0.5% - 25% of frame)
+                    area_ratio = face_area / frame_area if frame_area > 0 else 0
+                    if area_ratio < 0.005 or area_ratio > 0.25:
+                        continue
+
+                    weight = confidence * face_area
+                    center_x = face_x + face_w / 2
+                    center_y = face_y + face_h / 2
                     
                     weighted_x += center_x * weight
                     weighted_y += center_y * weight
                     total_weight += weight
                 
                 if total_weight > 0:
-                    # Calculate final weighted position
                     final_x = int(weighted_x / total_weight)
                     final_y = int(weighted_y / total_weight)
-                    
-                    # Apply UPPER BIAS for better face framing
-                    # Shift the target Y position up by 10% of window height
-                    # This places the face in the upper portion of the crop frame
-                    upper_bias = int(window_height * 0.1)
-                    final_y = max(0, final_y - upper_bias)
-                    
                     raw_positions.append((timestamp_ms, final_x, final_y))
-                    logger.debug(f"Weighted face position: ({final_x}, {final_y}) from {len(faces)} faces, total_weight={total_weight:.0f}")
                 else:
-                    # All faces filtered out - use last known or fallback
+                    # No valid faces - use bottom-right fallback for webcam
                     if raw_positions:
                         _, last_x, last_y = raw_positions[-1]
                         raw_positions.append((timestamp_ms, last_x, last_y))
                     else:
-                        # Fallback position based on layout type
-                        if layout_type == "screen_share":
-                            # Webcams are typically in corners - default to bottom-right
-                            # (most common webcam position)
-                            center_x = int(source_width * 0.85)  # Right side
-                            center_y = int(source_height * 0.85)  # Bottom
-                            logger.warning(f"No faces found for screen_share - using bottom-right fallback")
-                        else:
-                            center_x = source_width // 2
-                            center_y = int(source_height * 0.4)
+                        center_x = int(source_width * 0.85)
+                        center_y = int(source_height * 0.85)
                         raw_positions.append((timestamp_ms, center_x, center_y))
             else:
-                # No face detected - use previous position or corner fallback
+                # No face detected - use last known or bottom-right fallback
                 if raw_positions:
-                    # Use last known position for continuity
                     _, last_x, last_y = raw_positions[-1]
                     raw_positions.append((timestamp_ms, last_x, last_y))
                 else:
-                    # Fallback position based on layout type
-                    if layout_type == "screen_share":
-                        # Webcams are typically in corners - default to bottom-right
-                        center_x = int(source_width * 0.85)  # Right side
-                        center_y = int(source_height * 0.85)  # Bottom
-                        logger.warning(f"No faces detected for screen_share - using bottom-right fallback")
-                    else:
-                        center_x = source_width // 2
-                        center_y = int(source_height * 0.4)  # Upper center for talking head
+                    center_x = int(source_width * 0.85)
+                    center_y = int(source_height * 0.85)
                     raw_positions.append((timestamp_ms, center_x, center_y))
         
         if not raw_positions:
-            # Should not happen given the logic above, but safe fallback
-            if layout_type == "screen_share":
-                # Webcams are typically in corners - default to bottom-right
-                center_x = int(source_width * 0.85)
-                center_y = int(source_height * 0.85)
-                logger.warning(f"Empty positions for screen_share - using bottom-right fallback")
-            else:
-                center_x = source_width // 2
-                center_y = source_height // 2
+            # Fallback to bottom-right for webcam
+            center_x = int(source_width * 0.85)
+            center_y = int(source_height * 0.85)
             raw_positions = [(segment.start_time_ms, center_x, center_y)]
         
         # Apply outlier rejection to remove sudden position jumps
@@ -1085,14 +1273,19 @@ class AIClippingPipeline:
             for i, layout_seg in enumerate(layout_segments):
                 segment_output = temp_dir / f"segment_{i:03d}.mp4"
 
-                logger.debug(
-                    f"Rendering segment {i + 1}/{len(layout_segments)}: "
-                    f"{layout_seg.start_ms}ms - {layout_seg.end_ms}ms ({layout_seg.layout_type})"
+                logger.info(
+                    f"Rendering layout segment {i + 1}/{len(layout_segments)}: "
+                    f"{layout_seg.start_ms}ms - {layout_seg.end_ms}ms "
+                    f"layout={layout_seg.layout_type}, corner_facecam_bbox={layout_seg.corner_facecam_bbox}"
                 )
 
                 # Filter detection frames for this segment's time range
                 seg_detection_frames = self._filter_detection_frames_for_segment(
                     detection_frames, layout_seg.start_ms, layout_seg.end_ms
+                )
+                logger.info(
+                    f"Segment {i + 1} detection frames: {len(seg_detection_frames)} frames "
+                    f"(from {len(detection_frames)} total, time range {layout_seg.start_ms}ms-{layout_seg.end_ms}ms)"
                 )
 
                 # Create a temporary segment for crop timeline building
@@ -1155,6 +1348,7 @@ class AIClippingPipeline:
                             seg_caption_style.position = "center"
 
                 # Build render request for this segment WITH captions per-segment
+                # Include corner_facecam_bbox from the layout segment for proper face cropping
                 render_request = RenderRequest(
                     video_path=video_path,
                     output_path=str(segment_output),
@@ -1167,6 +1361,7 @@ class AIClippingPipeline:
                     secondary_timeline=screen_timeline,
                     transcript_segments=seg_transcript if seg_transcript else None,
                     caption_style=seg_caption_style,
+                    corner_facecam_bbox=layout_seg.corner_facecam_bbox,
                 )
 
                 # Render segment
