@@ -592,7 +592,7 @@ class AIClippingPipeline:
             
             # Build webhook output payload with clip URLs and metadata
             # NOTE: Only include fields expected by ViewCreator API
-            # Excluded: start_time_ms, end_time_ms, layout_type (causes 400 errors)
+            # Excluded: start_time_ms, end_time_ms, layout_type, tags (causes 400 errors)
             webhook_output = {
                 "total_clips": len(clip_artifacts),
                 "source_video_title": job_output.source_video_title,
@@ -604,7 +604,6 @@ class AIClippingPipeline:
                         "duration_ms": clip.duration_ms,
                         "virality_score": clip.virality_score,
                         "summary": clip.summary,
-                        "tags": clip.tags,
                     }
                     for clip in clip_artifacts
                 ],
