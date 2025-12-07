@@ -65,8 +65,9 @@ WORKDIR $APP_HOME
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # FFmpeg for video processing
+    # FFmpeg for video processing (libdav1d0 for AV1 codec support)
     ffmpeg \
+    libdav1d0 \
     # OpenCV dependencies (libgl1 replaces deprecated libgl1-mesa-glx)
     libgl1 \
     libglib2.0-0 \
