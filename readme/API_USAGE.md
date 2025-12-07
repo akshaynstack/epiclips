@@ -26,7 +26,7 @@ Complete documentation for interacting with the ViewCreator Genesis FastAPI appl
 
 ## Quick Start
 
-python test_job.py --max-clips 3 --duration short --version _v16 --video "https://www.youtube.com/watch?v=BUdHe7J79J8"
+python test_job.py --max-clips 3 --duration short --version _v16 --video "https://www.youtube.com/watch?v=w1wNajAY3Ho"
 
 ```bash
 # 1. Start the server

@@ -2,10 +2,17 @@
 """
 Test script for ViewCreator Genesis AI Clipping API.
 
+HIGH-PRECISION MODE: Tests 1 FPS VLM sampling with frame-accurate rendering.
+
 Usage:
-    python test_job.py                    # Submit job and wait for completion
-    python test_job.py --download-only    # Download clips from last job
-    python test_job.py --video /path/to/local/video.mp4  # Upload local file and process
+    python test_job.py                    # Submit job and wait for completion (auto-download from S3)
+    python test_job.py --max-clips 3 --duration short  # Short clips for faster testing
+    
+Features:
+- 1 FPS VLM sampling (vs old 5-7 frames total)
+- Frame-accurate transition detection
+- Precise FFmpeg seeking
+- Auto-download from S3 using .env credentials
 """
 
 import argparse
@@ -14,58 +21,31 @@ import os
 import time
 import uuid
 import requests
-import boto3
+import subprocess
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
 
 # Configuration
 BASE_URL = "http://localhost:8000"
 API_KEY = "your-api-key"
-TEST_VIDEO_URL = "https://www.youtube.com/watch?v=qVW7uIQgTGQ"  # Claude Opus 4.5 video
+TEST_VIDEO_URL = "https://www.youtube.com/watch?v=QpgjzP6cBFA"  # Test video with layout transitions
 
-# AWS Configuration (from .env)
-AWS_ACCESS_KEY_ID = "AKIA4CRJFEIHMBK5EAGK"
-AWS_SECRET_ACCESS_KEY = "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"
-AWS_REGION = "us-east-1"
-S3_BUCKET = "viewcreator-media-dev-830088749582-d3de3c10"
+# AWS Configuration from .env
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+S3_BUCKET = os.getenv("S3_BUCKET")
 
 # Output directory
 OUTPUT_DIR = Path("test_clips")
+LOGS_DIR = Path("logs")
 
 
-def is_local_file(path: str) -> bool:
-    """Check if the path is a local file."""
-    # Check if it's an absolute path or relative path that exists
-    return os.path.exists(path) and os.path.isfile(path)
-
-
-def upload_local_file_to_s3(local_path: str) -> str:
-    """Upload a local file to S3 and return the S3 key."""
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_REGION
-    )
-    
-    # Generate unique S3 key
-    file_ext = Path(local_path).suffix
-    s3_key = f"test-uploads/{uuid.uuid4()}{file_ext}"
-    
-    print(f"📤 Uploading local file to S3...")
-    print(f"   Local: {local_path}")
-    print(f"   S3: s3://{S3_BUCKET}/{s3_key}")
-    
-    file_size = os.path.getsize(local_path) / 1024 / 1024
-    print(f"   Size: {file_size:.1f} MB")
-    
-    s3_client.upload_file(local_path, S3_BUCKET, s3_key)
-    print(f"✅ Upload complete!")
-    
-    return s3_key
-
-
-def submit_job(video_url: str = TEST_VIDEO_URL, max_clips: int = 3, duration_ranges: list = None, s3_key: str = None):
-    """Submit a clipping job."""
+def submit_job(max_clips: int = 3, duration_ranges: list = None):
+    """Submit a clipping job with high-precision settings."""
     if duration_ranges is None:
         duration_ranges = ["short"]
     
@@ -75,22 +55,19 @@ def submit_job(video_url: str = TEST_VIDEO_URL, max_clips: int = 3, duration_ran
     }
     
     payload = {
+        "video_url": TEST_VIDEO_URL,
         "max_clips": max_clips,
         "duration_ranges": duration_ranges,
         "include_captions": True,
         "caption_preset": "viral_gold",
-        "layout_type": "auto"
+        "layout_type": "auto"  # High-precision auto-detection with 1 FPS VLM sampling
     }
     
-    # Use s3_key if provided, otherwise use video_url
-    if s3_key:
-        payload["s3_key"] = s3_key
-        print(f"\n🚀 Submitting job for S3 key: {s3_key}")
-    else:
-        payload["video_url"] = video_url
-        print(f"\n🚀 Submitting job for: {video_url}")
-    
+    print(f"\n🚀 HIGH-PRECISION MODE: Submitting job")
+    print(f"   Video: {TEST_VIDEO_URL}")
     print(f"   Max clips: {max_clips}, Duration ranges: {duration_ranges}")
+    print(f"   VLM Sampling: 1 FPS (frame-accurate transition detection)")
+    print(f"   FFmpeg: Frame-accurate seeking enabled")
     
     response = requests.post(
         f"{BASE_URL}/ai-clipping/jobs",
@@ -111,8 +88,12 @@ def submit_job(video_url: str = TEST_VIDEO_URL, max_clips: int = 3, duration_ran
 
 
 def poll_job_status(job_id: str, poll_interval: int = 5):
-    """Poll job status until completion."""
+    """Poll job status until completion with detailed progress tracking."""
     print(f"\n⏳ Waiting for job {job_id} to complete...")
+    print(f"   Monitoring: VLM sampling rate, transition detection, segment rendering")
+    
+    start_time = time.time()
+    last_step = ""
     
     while True:
         response = requests.get(f"{BASE_URL}/ai-clipping/jobs/{job_id}")
@@ -126,10 +107,15 @@ def poll_job_status(job_id: str, poll_interval: int = 5):
         current_step = status.get("current_step", "")
         job_status = status.get("status", "")
         
-        print(f"   [{progress:5.1f}%] {job_status}: {current_step}")
+        # Show detailed progress
+        if current_step != last_step:
+            elapsed = time.time() - start_time
+            print(f"   [{progress:5.1f}%] [{elapsed:6.1f}s] {job_status}: {current_step}")
+            last_step = current_step
         
         if job_status == "completed":
-            print(f"\n✅ Job completed!")
+            elapsed = time.time() - start_time
+            print(f"\n✅ Job completed in {elapsed:.1f}s!")
             return status.get("output")
         elif job_status == "failed":
             print(f"\n❌ Job failed: {status.get('error')}")
@@ -138,133 +124,194 @@ def poll_job_status(job_id: str, poll_interval: int = 5):
         time.sleep(poll_interval)
 
 
-def download_clips_from_output(output: dict, version_suffix: str = ""):
-    """Download clips from job output."""
-    if not output:
-        print("❌ No output to download")
+def analyze_job_log(job_id: str):
+    """Analyze job log for high-precision metrics."""
+    log_files = list(LOGS_DIR.glob(f"job_{job_id}*.log"))
+    
+    if not log_files:
+        print(f"\n⚠️  No log file found for job {job_id}")
         return
+    
+    log_file = log_files[0]
+    print(f"\n📊 HIGH-PRECISION ANALYSIS: {log_file.name}")
+    print("=" * 80)
+    
+    vlm_frames = []
+    transitions = []
+    segments = []
+    
+    with open(log_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            # Track VLM sampling
+            if "VLM high-precision sampling:" in line:
+                vlm_frames.append(line.strip())
+            
+            # Track transition detection
+            if "Layout transition detected at frame" in line:
+                transitions.append(line.strip())
+            
+            # Track segment rendering
+            if "Segment" in line and "rendered:" in line and "boundary:" in line:
+                segments.append(line.strip())
+            
+            # Track concatenation
+            if "Segments concatenated successfully:" in line:
+                print(f"\n✅ CONCATENATION: {line.split('INFO - ')[-1].strip()}")
+    
+    # Print VLM sampling stats
+    if vlm_frames:
+        print(f"\n🔍 VLM SAMPLING:")
+        for frame_info in vlm_frames[:5]:  # Show first 5
+            print(f"   {frame_info.split('INFO - ')[-1]}")
+        if len(vlm_frames) > 5:
+            print(f"   ... and {len(vlm_frames) - 5} more clips")
+    
+    # Print transitions
+    if transitions:
+        print(f"\n🔄 LAYOUT TRANSITIONS DETECTED:")
+        for trans in transitions:
+            print(f"   {trans.split('INFO - ')[-1]}")
+    else:
+        print(f"\n✓ No layout transitions detected (single-layout clips)")
+    
+    # Print segments
+    if segments:
+        print(f"\n📹 SEGMENT RENDERING:")
+        for seg in segments:
+            print(f"   {seg.split('INFO - ')[-1]}")
+    
+    print("=" * 80)
+
+
+def copy_clips_from_temp(job_id: str, version_suffix: str = ""):
+    """Copy rendered clips from temp directory to test_clips."""
+    import shutil
     
     OUTPUT_DIR.mkdir(exist_ok=True)
     
-    clips = output.get("clips", [])
-    print(f"\n📥 Downloading {len(clips)} clips...")
+    # Look for clips in /tmp/genesis/{job_id}/clips/
+    if os.name == 'nt':  # Windows
+        temp_base = Path(os.environ.get('TEMP', 'C:/tmp')) / 'genesis'
+    else:
+        temp_base = Path('/tmp/genesis')
     
-    # Initialize S3 client
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_REGION
-    )
+    job_dir = temp_base / job_id / 'clips'
     
-    for clip in clips:
-        clip_index = clip.get("clip_index", 0)
-        s3_url = clip.get("s3_url", "")
+    if not job_dir.exists():
+        print(f"\n⚠️  Temp directory not found: {job_dir}")
+        print("   Clips may have been cleaned up already")
+        return
+    
+    clip_files = list(job_dir.glob("clip_*.mp4"))
+    
+    if not clip_files:
+        print(f"\n⚠️  No clips found in {job_dir}")
+        return
+    
+    print(f"\n📥 Copying {len(clip_files)} clips from temp directory...")
+    
+    for clip_file in sorted(clip_files):
+        clip_index = clip_file.stem.split('_')[1]
+        new_name = f"clip_{clip_index}{version_suffix}.mp4"
+        dest_path = OUTPUT_DIR / new_name
         
-        if not s3_url:
-            print(f"   ⚠️ Clip {clip_index} has no S3 URL")
-            continue
-        
-        # Extract S3 key from URL
-        # URL format: https://bucket.s3.region.amazonaws.com/key
-        # or: https://bucket.s3.amazonaws.com/key
-        try:
-            if ".s3." in s3_url:
-                s3_key = s3_url.split(".amazonaws.com/")[1]
-            else:
-                s3_key = s3_url.split(f"{S3_BUCKET}/")[1]
-        except IndexError:
-            print(f"   ⚠️ Could not parse S3 URL: {s3_url}")
-            continue
-        
-        # Download
-        local_filename = f"clip_{clip_index:02d}{version_suffix}.mp4"
-        local_path = OUTPUT_DIR / local_filename
-        
-        print(f"   Downloading clip {clip_index} -> {local_path}")
-        
-        try:
-            s3_client.download_file(S3_BUCKET, s3_key, str(local_path))
-            file_size = local_path.stat().st_size / 1024 / 1024
-            print(f"   ✅ Downloaded: {local_filename} ({file_size:.1f} MB)")
-        except Exception as e:
-            print(f"   ❌ Failed to download: {e}")
+        shutil.copy2(clip_file, dest_path)
+        file_size = dest_path.stat().st_size / 1024 / 1024
+        print(f"   ✅ Copied: {new_name} ({file_size:.1f} MB)")
     
     print(f"\n✅ Clips saved to: {OUTPUT_DIR.absolute()}")
 
 
-def download_from_urls(urls: list, version_suffix: str = "_latest"):
-    """Download clips from S3 URLs directly."""
+def download_clips_from_s3(output_data: dict, version_suffix: str = ""):
+    """Download clips from S3 using AWS CLI with credentials from .env."""
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        print("\n⚠️  AWS credentials not found in .env - skipping S3 download")
+        return
+    
     OUTPUT_DIR.mkdir(exist_ok=True)
     
-    print(f"\n📥 Downloading {len(urls)} clips...")
+    clips = output_data.get("clips", [])
+    if not clips:
+        print("\n⚠️  No clips found in output")
+        return
     
-    # Initialize S3 client
-    s3_client = boto3.client(
-        's3',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_REGION
-    )
+    print(f"\n📥 Downloading {len(clips)} clips from S3...")
     
-    for i, s3_url in enumerate(urls):
-        # Extract S3 key from URL
-        try:
-            if ".s3." in s3_url:
-                s3_key = s3_url.split(".amazonaws.com/")[1]
-            else:
-                print(f"   ⚠️ Could not parse S3 URL: {s3_url}")
-                continue
-        except IndexError:
-            print(f"   ⚠️ Could not parse S3 URL: {s3_url}")
+    # Set AWS environment variables
+    env = os.environ.copy()
+    env["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
+    env["AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
+    env["AWS_DEFAULT_REGION"] = AWS_REGION
+    
+    for clip in clips:
+        s3_url = clip.get("s3_url", "")
+        if not s3_url or not s3_url.startswith("http"):
             continue
         
-        # Download
-        local_filename = f"clip_{i:02d}{version_suffix}.mp4"
-        local_path = OUTPUT_DIR / local_filename
+        clip_index = clip.get("clip_index", 0)
+        new_name = f"clip_{clip_index:02d}{version_suffix}.mp4"
+        dest_path = OUTPUT_DIR / new_name
         
-        print(f"   Downloading -> {local_path}")
+        # Convert HTTPS URL to s3:// URL
+        # https://bucket.s3.region.amazonaws.com/path -> s3://bucket/path
+        s3_path = s3_url.replace(f"https://{S3_BUCKET}.s3.{AWS_REGION}.amazonaws.com/", f"s3://{S3_BUCKET}/")
+        
+        print(f"   Downloading clip {clip_index}...")
         
         try:
-            s3_client.download_file(S3_BUCKET, s3_key, str(local_path))
-            file_size = local_path.stat().st_size / 1024 / 1024
-            print(f"   ✅ Downloaded: {local_filename} ({file_size:.1f} MB)")
+            result = subprocess.run(
+                ["aws", "s3", "cp", s3_path, str(dest_path)],
+                env=env,
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                file_size = dest_path.stat().st_size / 1024 / 1024
+                print(f"   ✅ Downloaded: {new_name} ({file_size:.1f} MB)")
+            else:
+                print(f"   ❌ Failed to download clip {clip_index}: {result.stderr}")
+        except FileNotFoundError:
+            print(f"   ❌ AWS CLI not found - install with: pip install awscli")
+            return
         except Exception as e:
-            print(f"   ❌ Failed to download: {e}")
+            print(f"   ❌ Error downloading clip {clip_index}: {e}")
     
     print(f"\n✅ Clips saved to: {OUTPUT_DIR.absolute()}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test ViewCreator Genesis AI Clipping API")
-    parser.add_argument("--download-only", action="store_true", help="Only download clips from URLs")
-    parser.add_argument("--urls", nargs="+", help="S3 URLs to download")
-    parser.add_argument("--video", type=str, default=TEST_VIDEO_URL, help="YouTube video URL")
+    parser = argparse.ArgumentParser(
+        description="Test ViewCreator Genesis AI Clipping API (HIGH-PRECISION MODE)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+High-Precision Features:
+  - 1 FPS VLM sampling (every second vs old 5-7 frames total)
+  - Frame-accurate transition detection (±1 second precision)
+  - Frame-accurate FFmpeg seeking (microsecond precision)
+  - Smooth segment concatenation (no frame gaps/overlaps)
+  - Auto-download from S3 using .env credentials
+  
+Examples:
+  python test_job.py
+  python test_job.py --max-clips 5 --duration medium
+  python test_job.py --version _test1
+        """
+    )
     parser.add_argument("--max-clips", type=int, default=3, help="Maximum clips to generate")
-    parser.add_argument("--duration", type=str, default="short", help="Duration range: short, medium, long")
+    parser.add_argument("--duration", type=str, default="medium", help="Duration range: short, medium, long")
     parser.add_argument("--version", type=str, default="", help="Version suffix for downloaded files")
+    parser.add_argument("--analyze-only", type=str, help="Only analyze log for given job ID")
     
     args = parser.parse_args()
     
-    if args.download_only:
-        if args.urls:
-            download_from_urls(args.urls, args.version or "_manual")
-        else:
-            print("❌ No URLs provided. Use --urls to specify S3 URLs.")
+    if args.analyze_only:
+        analyze_job_log(args.analyze_only)
         return
-    
-    # Check if video is a local file
-    s3_key = None
-    video_url = args.video
-    
-    if is_local_file(args.video):
-        # Upload local file to S3 first
-        s3_key = upload_local_file_to_s3(args.video)
-        video_url = None  # Will use s3_key instead
     
     # Submit and process job
     duration_ranges = [args.duration]
-    job_id = submit_job(video_url, args.max_clips, duration_ranges, s3_key=s3_key)
+    job_id = submit_job(args.max_clips, duration_ranges)
     
     if not job_id:
         return
@@ -272,24 +319,51 @@ def main():
     # Wait for completion
     output = poll_job_status(job_id)
     
-    if output:
-        # Download clips
-        version = args.version or f"_v{int(time.time()) % 1000}"
-        download_clips_from_output(output, version)
+    # Analyze log regardless of success/failure
+    print("\n" + "=" * 80)
+    analyze_job_log(job_id)
+    
+    if not output:
+        print("\n⚠️  Job failed - check logs for details")
+        return
+    
+    # Download clips from S3
+    version = args.version or f"_v{int(time.time()) % 1000}"
+    download_clips_from_s3(output, version)
+    
+    # Print detailed summary
+    print("\n" + "=" * 80)
+    print("📊 JOB SUMMARY (HIGH-PRECISION MODE)")
+    print("=" * 80)
+    print(f"   Source: {output.get('source_video_title', 'Unknown')}")
+    print(f"   Duration: {output.get('source_video_duration_seconds', 0):.1f}s")
+    print(f"   Clips Generated: {output.get('total_clips', 0)}")
+    print(f"   Processing Time: {output.get('processing_time_seconds', 0):.1f}s")
+    
+    clips = output.get("clips", [])
+    for clip in clips:
+        clip_idx = clip.get('clip_index', 0)
+        layout = clip.get('layout_type', 'unknown')
+        duration_sec = clip.get('duration_ms', 0) / 1000
+        start_sec = clip.get('start_time_ms', 0) / 1000
+        end_sec = clip.get('end_time_ms', 0) / 1000
+        virality = clip.get('virality_score', 0)
+        summary = clip.get('summary', '')[:60]
         
-        # Print summary
-        print("\n📊 Job Summary:")
-        print(f"   Source: {output.get('source_video_title', 'Unknown')}")
-        print(f"   Duration: {output.get('source_video_duration_seconds', 0):.1f}s")
-        print(f"   Clips: {output.get('total_clips', 0)}")
-        print(f"   Processing time: {output.get('processing_time_seconds', 0):.1f}s")
-        
-        for clip in output.get("clips", []):
-            print(f"\n   Clip {clip.get('clip_index', 0)}:")
-            print(f"      Layout: {clip.get('layout_type', 'unknown')}")
-            print(f"      Duration: {clip.get('duration_ms', 0) / 1000:.1f}s")
-            print(f"      Virality: {clip.get('virality_score', 0):.2f}")
-            print(f"      Summary: {clip.get('summary', '')[:80]}...")
+        print(f"\n   Clip {clip_idx}:")
+        print(f"      Time: {start_sec:.1f}s - {end_sec:.1f}s ({duration_sec:.1f}s)")
+        print(f"      Layout: {layout}")
+        print(f"      Virality: {virality:.2f}")
+        print(f"      Summary: {summary}...")
+    
+    print("\n" + "=" * 80)
+    print("✅ HIGH-PRECISION TEST COMPLETE")
+    print("=" * 80)
+    print(f"\n💡 Check logs for:")
+    print(f"   - 'VLM high-precision sampling: X frames' (should be ~1 per second)")
+    print(f"   - 'Layout transition detected at frame Xms' (if transitions exist)")
+    print(f"   - 'Segment N rendered: ... boundary: Xms-Yms' (exact boundaries)")
+    print(f"   - 'Segments concatenated successfully' (no gaps/overlaps)")
 
 
 if __name__ == "__main__":

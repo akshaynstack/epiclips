@@ -126,31 +126,48 @@ class FaceTrack:
         
         # Position match score (if preferred_position is set)
         position_match_score = 0.0
+        position_disqualified = False
         if preferred_position:
-            # Define target centers for quadrants
+            # Define target centers and STRICT bounds for quadrants
+            # A corner webcam should be in the actual corner, not just "closer to corner than center"
             targets = {
-                "top-left": (0.25, 0.25),
-                "top-right": (0.75, 0.25),
-                "bottom-left": (0.25, 0.75),
-                "bottom-right": (0.75, 0.75),
+                "top-left": {"center": (0.2, 0.2), "x_max": 0.4, "y_max": 0.4, "x_min": 0.0, "y_min": 0.0},
+                "top-right": {"center": (0.8, 0.2), "x_min": 0.6, "y_max": 0.4, "x_max": 1.0, "y_min": 0.0},
+                "bottom-left": {"center": (0.2, 0.8), "x_max": 0.4, "y_min": 0.6, "x_min": 0.0, "y_max": 1.0},
+                "bottom-right": {"center": (0.8, 0.8), "x_min": 0.6, "y_min": 0.6, "x_max": 1.0, "y_max": 1.0},
             }
             target = targets.get(preferred_position)
             if target:
-                tx, ty = target
-                # Distance score (1.0 = perfect match, 0.0 = far away)
-                dist = ((self.avg_center_x - tx)**2 + (self.avg_center_y - ty)**2)**0.5
-                position_match_score = max(0.0, 1.0 - dist * 2)  # Decay quickly
+                tx, ty = target["center"]
+                
+                # STRICT BOUNDS CHECK: Face must be in the correct quadrant
+                in_x_bounds = target.get("x_min", 0) <= self.avg_center_x <= target.get("x_max", 1)
+                in_y_bounds = target.get("y_min", 0) <= self.avg_center_y <= target.get("y_max", 1)
+                
+                if in_x_bounds and in_y_bounds:
+                    # Face is in the correct quadrant - score based on distance from center
+                    dist = ((self.avg_center_x - tx)**2 + (self.avg_center_y - ty)**2)**0.5
+                    position_match_score = max(0.0, 1.0 - dist * 2)
+                else:
+                    # Face is NOT in the requested quadrant - heavily penalize it
+                    position_match_score = -1.0  # Negative score to demote this face
+                    position_disqualified = True
         
         # Combine scores with weights
         if preferred_position:
-            # If we have a preferred position, prioritize it heavily
-            self.dominance_score = (
-                0.1 * size_score +
-                0.1 * center_score +
-                0.1 * bottom_score +
-                0.2 * persistence_score +
-                0.5 * position_match_score  # 50% weight on position match
-            )
+            if position_disqualified:
+                # Face is outside the requested quadrant - give very low score
+                # but not zero so we can still use it as fallback if nothing better exists
+                self.dominance_score = -0.5
+            else:
+                # Face is in the correct quadrant - prioritize position match heavily
+                self.dominance_score = (
+                    0.1 * size_score +
+                    0.1 * center_score +
+                    0.1 * bottom_score +
+                    0.2 * persistence_score +
+                    0.5 * position_match_score  # 50% weight on position match
+                )
         else:
             self.dominance_score = (
                 DOMINANT_FACE_SIZE_WEIGHT * size_score +
@@ -537,11 +554,22 @@ class FaceTracker:
         if preferred_position:
             for track in valid_tracks:
                 track.update_metrics(self._frame_width, self._frame_height, len(self._frame_results), preferred_position)
+                # Log position filtering info
+                logger.debug(
+                    f"Track {track.track_id}: pos=({track.avg_center_x:.2f}, {track.avg_center_y:.2f}), "
+                    f"score={track.dominance_score:.3f}, preferred={preferred_position}"
+                )
         
-        # Find the overall dominant track
+        # Find the overall dominant track (highest score, even if negative it's our best option)
         dominant_track = None
         if valid_tracks:
             dominant_track = max(valid_tracks, key=lambda t: t.dominance_score)
+            if dominant_track.dominance_score < 0 and preferred_position:
+                logger.warning(
+                    f"No face found in {preferred_position} quadrant. Best match: "
+                    f"track {dominant_track.track_id} at ({dominant_track.avg_center_x:.2f}, {dominant_track.avg_center_y:.2f}) "
+                    f"with score {dominant_track.dominance_score:.3f}"
+                )
         
         # Calculate statistics
         total_faces = sum(fr.num_detections for fr in self._frame_results)

@@ -153,26 +153,26 @@ class VLMLayoutDetector:
         # Prompt for layout detection - optimized for accuracy
         prompt = """Analyze this video screenshot to determine the layout type.
 
-CRITICAL DISTINCTION - READ CAREFULLY:
+CRITICAL RULES - FOLLOW EXACTLY:
 
-**TALKING HEAD** = A person's face/body is the MAIN SUBJECT of the frame:
-- Person takes up >30% of the frame
-- Person is centered or near-center
-- Background may show room, whiteboard, wall, office - but person is the FOCUS
-- NO screen recording, NO slides, NO code, NO browser visible
-- Face is FULL SIZE, not a tiny overlay
+1. **SCREEN CONTENT CHECK** - Look for code, browser, slides, applications, documents:
+   - If you see ANY code editor, browser tabs, application UI, terminal, or document → "screen_recording"
+   - Even if there's a person visible, if screen content exists → "screen_recording"
 
-**SCREEN SHARE WITH WEBCAM** = Screen content is primary, with a SMALL person overlay:
-- Main content is: code, browser, slides, pricing tables, software UI, documents
-- There is a TINY webcam overlay (10-25% of screen) in a CORNER
-- The webcam shows just a face in a small box, NOT the main subject
-- Person is clearly IN A CORNER (top-left, top-right, bottom-left, bottom-right)
+2. **WEBCAM OVERLAY DETECTION**:
+   - Small face in a CORNER (top-left, top-right, bottom-left, bottom-right) → has_webcam_overlay: true
+   - Face can be 10-30% of screen - as long as it's in a CORNER with screen content visible
+   - Specify exact corner position: "bottom-right", "bottom-left", "top-right", "top-left"
 
-**SCREEN SHARE WITHOUT WEBCAM** = Only screen content, no person visible:
-- Just code, browser, slides, documents - no face at all
+3. **TALKING HEAD** - ONLY if ALL these are true:
+   - NO code, NO browser, NO application UI, NO slides visible
+   - Person is the ONLY content (just face/body and room background)
+   - Main background is: plain wall, room, office, whiteboard - NOT a computer screen
+   - Person is CENTERED or takes up majority of frame
 
-KEY RULE: If the person's face/body is the MAIN FOCUS of the frame (not in a corner), 
-that is ALWAYS "talking_head" even if there's a whiteboard behind them!
+DECISION TREE:
+- See code/browser/apps/slides? → "screen_recording" (check for corner webcam)
+- ONLY person + room/wall/whiteboard? → "talking_head"
 
 Respond with ONLY this JSON:
 {"has_webcam_overlay": boolean, "webcam_position": "bottom-right"|"bottom-left"|"top-right"|"top-left"|null, "main_content": "talking_head"|"screen_recording", "confidence": 0.9, "reasoning": "brief explanation"}"""
@@ -410,32 +410,37 @@ Respond with ONLY this JSON:
             duration_ms = end_ms - start_ms
             duration_sec = duration_ms / 1000
             
-            # AUTO-CALCULATE sample count based on duration
-            # More samples for longer clips to catch transitions
+            # HIGH-PRECISION MODE: Sample at 1 FPS (1000ms intervals) for accurate layout detection
+            # This catches ALL layout changes and ensures smooth transitions
             if sample_count is None:
-                if duration_sec <= 15:
-                    sample_count = 3  # Short clips: 3 frames
-                elif duration_sec <= 30:
-                    sample_count = 5  # Medium clips: 5 frames (every ~6 seconds)
-                else:
-                    sample_count = 7  # Long clips: 7 frames (every ~5-8 seconds)
+                # Sample every second (1 FPS) for maximum accuracy
+                # Minimum 3 frames for very short clips, maximum based on duration
+                sample_count = max(3, min(int(duration_sec), 60))  # Cap at 60 frames for very long clips
             
-            logger.info(f"VLM sampling {sample_count} frames for {duration_sec:.1f}s clip")
+            logger.info(f"VLM high-precision sampling: {sample_count} frames for {duration_sec:.1f}s clip (1 FPS mode)")
             
-            # Sample frames INCLUDING start and end to catch boundary transitions
-            # First sample: 0.5s into clip (to avoid black/transition frames)
-            # Last sample: 0.5s before end
-            # Middle samples: evenly distributed
+            # HIGH-PRECISION: Sample at exact 1-second intervals for frame-accurate detection
+            # First sample at 500ms (avoid black frames), then every 1000ms
             if sample_count == 1:
                 sample_times = [start_ms + duration_ms // 2]
+            elif sample_count == 2:
+                # For 2 samples, use start margin and end margin
+                margin_ms = 500
+                sample_times = [start_ms + margin_ms, end_ms - margin_ms]
             else:
-                # First sample at ~500ms into clip, last sample at ~500ms before end
-                margin_ms = min(500, duration_ms // (sample_count * 2))
-                usable_duration = duration_ms - (2 * margin_ms)
-                sample_times = [
-                    start_ms + margin_ms + int(usable_duration * i / (sample_count - 1))
-                    for i in range(sample_count)
-                ]
+                # Start 500ms in, then sample every 1000ms
+                margin_ms = 500
+                sample_times = [start_ms + margin_ms]
+                
+                # Add 1-second interval samples
+                for i in range(1, sample_count - 1):
+                    sample_times.append(start_ms + margin_ms + (i * 1000))
+                
+                # Last sample 500ms before end
+                sample_times.append(end_ms - margin_ms)
+                
+                # Ensure we don't exceed clip duration
+                sample_times = [t for t in sample_times if t < end_ms]
             
             frame_results: list[VLMFrameResult] = []
             vlm_results = []

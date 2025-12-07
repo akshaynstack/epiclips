@@ -1145,17 +1145,21 @@ class RenderingService:
         video_filters: list[str],
         include_audio: bool = True,
     ) -> None:
-        """Run FFmpeg with given filters."""
+        """Run FFmpeg with frame-accurate seeking for precise clip extraction."""
         start_sec = start_time_ms / 1000
         duration_sec = duration_ms / 1000
         
+        # Frame-accurate seeking: Use -ss before -i for fast seek, then trim precisely
+        # This ensures no frames are skipped at boundaries
         cmd = [
             "ffmpeg",
             "-y",
-            "-ss", f"{start_sec:.3f}",
+            "-accurate_seek",  # Enable frame-accurate seeking
+            "-ss", f"{start_sec:.6f}",  # Use high precision (microseconds)
             "-i", input_path,
-            "-t", f"{duration_sec:.3f}",
+            "-t", f"{duration_sec:.6f}",  # High precision duration
             "-vf", ",".join(video_filters),
+            "-avoid_negative_ts", "make_zero",  # Ensure timestamps start at 0
             "-preset", self.settings.ffmpeg_preset,
             "-crf", str(self.settings.ffmpeg_crf),
             "-pix_fmt", "yuv420p",

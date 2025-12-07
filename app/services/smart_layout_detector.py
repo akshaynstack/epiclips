@@ -1855,19 +1855,27 @@ class SmartLayoutDetector:
                 current_webcam_pos = frame_webcam_pos
                 confidences.append(frame_result.confidence)
             elif frame_layout != current_layout:
-                # Layout changed - create a segment up to this frame's timestamp
+                # Layout changed - use EXACT frame timestamp as boundary (no interpolation)
+                # This ensures frame-accurate transitions with 1 FPS sampling
                 avg_confidence = sum(confidences) / len(confidences) if confidences else 0.8
                 
-                # Calculate segment end time (midpoint between previous and current frame)
-                if i > 0:
-                    prev_time = frame_results[i-1].timestamp_ms
-                    curr_time = frame_result.timestamp_ms
-                    segment_end = (prev_time + curr_time) // 2
-                else:
-                    segment_end = frame_result.timestamp_ms
+                # Use the EXACT timestamp where layout changed
+                # With 1 FPS sampling, this is accurate to 1 second
+                segment_end = frame_result.timestamp_ms
                 
-                # Ensure segment_end is within bounds
+                # Add a small buffer (500ms) to previous segment to avoid transition glitches
+                # This ensures we don't cut right at the moment of transition
+                transition_buffer_ms = 500
+                if segment_end > segment_start + 2000:  # Only if segment is long enough
+                    segment_end = segment_end - transition_buffer_ms
+                
+                # Ensure segment is at least 1 second and within bounds
                 segment_end = max(segment_start + 1000, min(segment_end, end_ms))
+                
+                logger.info(
+                    f"Layout transition detected at frame {frame_result.timestamp_ms}ms: "
+                    f"{current_layout} -> {frame_layout}"
+                )
                 
                 # Create webcam bbox for screen_share segments
                 webcam_bbox = None

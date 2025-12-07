@@ -365,6 +365,16 @@ class AIClippingPipeline:
             )
             logger.info("Detection analysis complete")
             
+            # Log layout analysis results for debugging
+            for idx, clip_data in detection_results.items():
+                layout_analysis = clip_data.get('layout_analysis')
+                if layout_analysis:
+                    logger.info(
+                        f"Clip {idx} detection result: has_transitions={layout_analysis.has_transitions}, "
+                        f"segments={len(layout_analysis.layout_segments)}, "
+                        f"dominant={layout_analysis.dominant_layout}"
+                    )
+            
             # Step 5: Render clips IN PARALLEL
             clips_dir = os.path.join(work_dir, "clips")
             os.makedirs(clips_dir, exist_ok=True)
@@ -398,6 +408,11 @@ class AIClippingPipeline:
                     )
                     
                     # Check if clip has layout transitions - use segment-based rendering
+                    logger.info(
+                        f"Clip {i + 1} layout check: layout_analysis={layout_analysis is not None}, "
+                        f"has_transitions={layout_analysis.has_transitions if layout_analysis else 'N/A'}, "
+                        f"segments={len(layout_analysis.layout_segments) if layout_analysis else 0}"
+                    )
                     if layout_analysis and layout_analysis.has_transitions and len(layout_analysis.layout_segments) > 1:
                         logger.info(
                             f"Clip {i + 1} has {len(layout_analysis.layout_segments)} layout segments - "
@@ -585,8 +600,12 @@ class AIClippingPipeline:
                         "clip_index": clip.clip_index,
                         "s3_url": clip.s3_url,
                         "duration_ms": clip.duration_ms,
+                        "start_time_ms": clip.start_time_ms,
+                        "end_time_ms": clip.end_time_ms,
                         "virality_score": clip.virality_score,
+                        "layout_type": clip.layout_type,
                         "summary": clip.summary,
+                        "tags": clip.tags,
                     }
                     for clip in clip_artifacts
                 ],
@@ -748,12 +767,30 @@ class AIClippingPipeline:
                                 )
                                 if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
                                     dom_bbox = tracking_result.dominant_track.smoothed_bbox
+                                    dom_score = tracking_result.dominant_track.dominance_score
                                     x, y, w, h = dom_bbox
                                     face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
                                     
+                                    # Check if the dominant face is actually in the requested quadrant
+                                    # (negative score means it was disqualified from position matching)
+                                    if dom_score < 0:
+                                        logger.warning(
+                                            f"Face tracking: no face in {preferred_pos} quadrant. "
+                                            f"Best match at ({x},{y}) has score {dom_score:.2f}. Using fallback bbox."
+                                        )
+                                        # Use VLM position-based fallback instead
+                                        fallback_bbox = self._estimate_webcam_bbox_from_position(
+                                            preferred_pos, source_width, source_height
+                                        )
+                                        if fallback_bbox:
+                                            layout_analysis.corner_facecam_bbox = fallback_bbox
+                                            for seg in layout_analysis.layout_segments:
+                                                if seg.layout_type == "screen_share":
+                                                    seg.corner_facecam_bbox = fallback_bbox
+                                            logger.info(f"Using VLM position-based fallback bbox: {fallback_bbox}")
                                     # QUALITY GATE: Face must be small (< 10%) - visibility threshold removed
                                     # When VLM detects webcam, we trust it and just validate the face is corner-sized
-                                    if face_area_ratio < 0.10:
+                                    elif face_area_ratio < 0.10:
                                         layout_analysis.corner_facecam_bbox = dom_bbox
                                         for seg in layout_analysis.layout_segments:
                                             if seg.layout_type == "screen_share":
@@ -854,12 +891,11 @@ class AIClippingPipeline:
                                             f"Trusting VLM detection and estimating bbox."
                                         )
                                         # Estimate webcam bbox from VLM position
-                                        estimated_bbox = self._estimate_webcam_bbox_from_position(
+                                        bbox_tuple = self._estimate_webcam_bbox_from_position(
                                             layout_analysis.webcam_position,
                                             source_width,
                                             source_height,
                                         )
-                                        bbox_tuple = (estimated_bbox["x"], estimated_bbox["y"], estimated_bbox["width"], estimated_bbox["height"])
                                         layout_analysis.corner_facecam_bbox = bbox_tuple
                                         for seg in layout_analysis.layout_segments:
                                             if seg.layout_type == "screen_share":
@@ -920,15 +956,13 @@ class AIClippingPipeline:
                                 else:
                                     # Face too large - estimate a corner region instead
                                     logger.warning(f"Clip {i}: Face too large for split_screen ({face_area_ratio:.1%}). Estimating corner webcam.")
-                                    estimated_bbox = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
-                                    bbox_tuple = (estimated_bbox["x"], estimated_bbox["y"], estimated_bbox["width"], estimated_bbox["height"])
+                                    bbox_tuple = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
                                     layout_analysis.corner_facecam_bbox = bbox_tuple
                                     layout_analysis.layout_segments[0].corner_facecam_bbox = bbox_tuple
                             else:
                                 # No dominant face found - estimate a corner region
                                 logger.warning(f"Clip {i}: Explicit split_screen requested but no dominant face found. Estimating bottom-right webcam.")
-                                estimated_bbox = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
-                                bbox_tuple = (estimated_bbox["x"], estimated_bbox["y"], estimated_bbox["width"], estimated_bbox["height"])
+                                bbox_tuple = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
                                 layout_analysis.corner_facecam_bbox = bbox_tuple
                                 layout_analysis.layout_segments[0].corner_facecam_bbox = bbox_tuple
                         except Exception as e:
@@ -982,6 +1016,7 @@ class AIClippingPipeline:
         source_width: int,
         source_height: int,
         effective_layout: Optional[str] = None,
+        corner_facecam_bbox: Optional[tuple[int, int, int, int]] = None,
     ) -> Optional[CropTimeline]:
         """
         Build a crop timeline from detection results for face tracking.
@@ -992,6 +1027,7 @@ class AIClippingPipeline:
         
         Args:
             effective_layout: Override layout type from smart detector (takes priority over segment.layout_type)
+            corner_facecam_bbox: (x, y, w, h) of webcam overlay for filtering faces in screen_share mode
         """
         # Use effective_layout from smart detector if provided, otherwise fallback to segment's layout
         layout_type = effective_layout if effective_layout else segment.layout_type
@@ -1004,14 +1040,44 @@ class AIClippingPipeline:
 
             # Calculate face size from detections
             face_areas = []
+            filtered_faces_count = 0
+            total_faces_count = 0
+            
             if detection_frames:
                 for frame in detection_frames:
                     for face in frame.get("detections", []):
                         bbox = face.get("bbox", {})
                         face_w = bbox.get("width", 0)
                         face_h = bbox.get("height", 0)
+                        face_x = bbox.get("x", 0) + face_w / 2  # Face center X
+                        face_y = bbox.get("y", 0) + face_h / 2  # Face center Y
+                        
                         if face_w > 30 and face_h > 30:
-                            face_areas.append(face_w * face_h)
+                            total_faces_count += 1
+                            
+                            # If we have corner_facecam_bbox, ONLY use faces near that location
+                            # This filters out large faces from whiteboard sections
+                            if corner_facecam_bbox:
+                                webcam_x, webcam_y, webcam_w, webcam_h = corner_facecam_bbox
+                                webcam_center_x = webcam_x + webcam_w / 2
+                                webcam_center_y = webcam_y + webcam_h / 2
+                                
+                                # Only count faces within webcam region (allow 50% margin)
+                                margin = 1.5
+                                if (abs(face_x - webcam_center_x) < webcam_w * margin and
+                                    abs(face_y - webcam_center_y) < webcam_h * margin):
+                                    face_areas.append(face_w * face_h)
+                                    filtered_faces_count += 1
+                            else:
+                                # No bbox filter - use all faces
+                                face_areas.append(face_w * face_h)
+                                filtered_faces_count += 1
+            
+            if corner_facecam_bbox and total_faces_count > 0:
+                logger.info(
+                    f"Webcam face filter: {filtered_faces_count}/{total_faces_count} faces kept "
+                    f"(bbox center: {webcam_center_x:.0f},{webcam_center_y:.0f}, margin: {webcam_w * margin:.0f}px)"
+                )
 
             if face_areas:
                 # Use average face area
@@ -1448,6 +1514,7 @@ class AIClippingPipeline:
                 logger.info(
                     f"Rendering layout segment {i + 1}/{len(layout_segments)}: "
                     f"{layout_seg.start_ms}ms - {layout_seg.end_ms}ms "
+                    f"(duration: {(layout_seg.end_ms - layout_seg.start_ms) / 1000:.1f}s) "
                     f"layout={layout_seg.layout_type}, corner_facecam_bbox={layout_seg.corner_facecam_bbox}"
                 )
 
@@ -1471,11 +1538,13 @@ class AIClippingPipeline:
                 )
 
                 # Build crop timeline for this segment
+                # Pass corner_facecam_bbox to filter out wrong faces
                 crop_timeline = self._build_crop_timeline(
                     seg_detection_frames,
                     temp_segment,
                     source_width,
                     source_height,
+                    corner_facecam_bbox=layout_seg.corner_facecam_bbox,
                 )
 
                 # For screen_share layout, build screen timeline
@@ -1540,7 +1609,13 @@ class AIClippingPipeline:
                 await self.rendering_service.render_clip(render_request)
                 segment_files.append(segment_output)
 
-                logger.debug(f"Segment {i + 1} rendered: {segment_output}")
+                segment_size = segment_output.stat().st_size / 1024 / 1024
+                segment_duration = (layout_seg.end_ms - layout_seg.start_ms) / 1000
+                logger.info(
+                    f"Segment {i + 1} rendered: {segment_output.name}, "
+                    f"{segment_size:.1f} MB, {segment_duration:.1f}s, "
+                    f"boundary: {layout_seg.start_ms}ms-{layout_seg.end_ms}ms"
+                )
 
             # Concatenate all segments (captions already burned into each segment)
             await self._concatenate_segments(segment_files, output_path)
@@ -1613,18 +1688,22 @@ class AIClippingPipeline:
                     safe_path = str(seg_file.absolute()).replace("'", "'\\''")
                     f.write(f"file '{safe_path}'\n")
 
-            logger.debug(f"Concatenating {len(segment_files)} segments")
+            logger.debug(f"Concatenating {len(segment_files)} segments with frame-accurate boundaries")
 
+            # Frame-accurate concatenation to prevent gaps/overlaps
             cmd = [
                 'ffmpeg', '-y',
                 '-f', 'concat',
                 '-safe', '0',
+                '-accurate_seek',  # Ensure frame accuracy
                 '-i', str(concat_file),
                 '-c:v', 'libx264',
                 '-c:a', 'aac',
                 '-preset', self.settings.ffmpeg_preset,
                 '-crf', str(self.settings.ffmpeg_crf),
                 '-pix_fmt', 'yuv420p',
+                '-avoid_negative_ts', 'make_zero',  # Normalize timestamps
+                '-fflags', '+genpts',  # Generate presentation timestamps
                 output_path,
             ]
 
@@ -1639,7 +1718,13 @@ class AIClippingPipeline:
                 error_msg = result.stderr.decode()[-1000:] if result.stderr else "Unknown error"
                 raise RuntimeError(f"FFmpeg concat failed: {error_msg}")
 
-            logger.debug(f"Segments concatenated: {output_path}")
+            # Validate concatenated output
+            actual_size = os.path.getsize(output_path) / 1024 / 1024
+            
+            logger.info(
+                f"Segments concatenated successfully: {len(segment_files)} segments, "
+                f"{actual_size:.1f} MB"
+            )
 
         finally:
             # Cleanup concat file
@@ -1762,7 +1847,7 @@ class AIClippingPipeline:
         position: str,
         frame_width: int,
         frame_height: int,
-    ) -> Dict[str, int]:
+    ) -> tuple[int, int, int, int]:
         """
         Estimate webcam bounding box from VLM-detected position.
         
@@ -1776,11 +1861,11 @@ class AIClippingPipeline:
             frame_height: Height of the video frame
             
         Returns:
-            Dict with x, y, width, height for estimated webcam region
+            Tuple (x, y, width, height) for estimated webcam region
         """
-        # Assume webcam overlays are typically 25-35% of frame dimensions
-        webcam_width = int(frame_width * 0.30)
-        webcam_height = int(frame_height * 0.30)
+        # Assume webcam overlays are typically 20-25% of frame dimensions
+        webcam_width = int(frame_width * 0.20)
+        webcam_height = int(frame_height * 0.20)
         
         # Calculate position based on VLM detection
         position_lower = (position or "bottom-right").lower()
@@ -1803,12 +1888,7 @@ class AIClippingPipeline:
         
         logger.info(f"Estimated webcam bbox from VLM position '{position}': x={x}, y={y}, w={webcam_width}, h={webcam_height}")
         
-        return {
-            "x": x,
-            "y": y,
-            "width": webcam_width,
-            "height": webcam_height,
-        }
+        return (x, y, webcam_width, webcam_height)
 
     def _filter_transcript_for_clip(
         self,
