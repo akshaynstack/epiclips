@@ -113,6 +113,7 @@ class VideoDownloaderService:
         """
         # Prioritize H.264/VP9 at 1080p, exclude AV1 codec
         # vcodec^=avc1 = H.264, vcodec=vp9 = VP9
+        # vcodec!^=av01 = exclude AV1 (MUST be in all fallbacks)
         return (
             "bestvideo[height=1080][vcodec^=avc1]+bestaudio/"
             "bestvideo[height=1080][vcodec=vp9]+bestaudio/"
@@ -120,7 +121,7 @@ class VideoDownloaderService:
             "bestvideo[height>=720][vcodec=vp9]+bestaudio/"
             "bestvideo[vcodec^=avc1]+bestaudio/"
             "bestvideo[vcodec=vp9]+bestaudio/"
-            "bestvideo[height<=1080]+bestaudio/best"
+            "bestvideo[height<=1080][vcodec!^=av01]+bestaudio[vcodec!^=av01]/best[vcodec!^=av01]"
         )
 
     def _build_ytdlp_opts(
@@ -302,15 +303,18 @@ class VideoDownloaderService:
         logger.info(f"rnet available: {is_rnet_available()}")
 
         # Format selectors prioritizing 1080p, then 720p, then best available
+        # CRITICAL: All selectors MUST exclude AV1 codec (vcodec!^=av01) because:
+        # - ECS Fargate lacks hardware AV1 decoding
+        # - Software decoding fails with "Missing Sequence Header" errors
         format_selectors = [
-            # Priority 1: Exact 1080p with audio
-            "bestvideo[height=1080]+bestaudio/bestvideo[height=1080][ext=mp4]+bestaudio[ext=m4a]",
-            # Priority 2: 720p or higher
-            "bestvideo[height>=720]+bestaudio/bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]",
-            # Priority 3: Best available up to 1080p
-            "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
-            # Final fallback
-            "best",
+            # Priority 1: H.264 at 1080p (most compatible)
+            "bestvideo[height=1080][vcodec^=avc1]+bestaudio/bestvideo[height=1080][vcodec=vp9]+bestaudio",
+            # Priority 2: H.264/VP9 at 720p+
+            "bestvideo[height>=720][vcodec^=avc1]+bestaudio/bestvideo[height>=720][vcodec=vp9]+bestaudio",
+            # Priority 3: Any H.264/VP9 quality
+            "bestvideo[vcodec^=avc1]+bestaudio/bestvideo[vcodec=vp9]+bestaudio",
+            # Priority 4: Exclude AV1 explicitly (catches edge cases)
+            "bestvideo[vcodec!^=av01]+bestaudio[vcodec!^=av01]/best[vcodec!^=av01]",
         ]
 
         # Run download in thread pool to not block event loop
