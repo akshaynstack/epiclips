@@ -105,12 +105,22 @@ class VideoDownloaderService:
         """
         Returns a format selector that prioritizes 1080p quality.
         Uses multiple fallbacks to ensure we get the best available quality.
+        
+        IMPORTANT: Excludes AV1 codec (vcodec=av01) because:
+        - ECS Fargate doesn't support hardware-accelerated AV1 decoding
+        - Software AV1 decoding fails with "Missing Sequence Header" errors
+        - H.264 (avc1) and VP9 work reliably on all platforms
         """
-        # Prioritize 1080p, then 720p, then best available
-        # First try exact 1080p, then >=720p, then best available
+        # Prioritize H.264/VP9 at 1080p, exclude AV1 codec
+        # vcodec^=avc1 = H.264, vcodec=vp9 = VP9
         return (
-            "bestvideo[height=1080]+bestaudio/bestvideo[height>=720]+bestaudio/"
-            "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best"
+            "bestvideo[height=1080][vcodec^=avc1]+bestaudio/"
+            "bestvideo[height=1080][vcodec=vp9]+bestaudio/"
+            "bestvideo[height>=720][vcodec^=avc1]+bestaudio/"
+            "bestvideo[height>=720][vcodec=vp9]+bestaudio/"
+            "bestvideo[vcodec^=avc1]+bestaudio/"
+            "bestvideo[vcodec=vp9]+bestaudio/"
+            "bestvideo[height<=1080]+bestaudio/best"
         )
 
     def _build_ytdlp_opts(

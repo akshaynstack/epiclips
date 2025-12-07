@@ -298,8 +298,8 @@ Examples:
   python test_job.py --version _test1
         """
     )
-    parser.add_argument("--max-clips", type=int, default=3, help="Maximum clips to generate")
-    parser.add_argument("--duration", type=str, default="medium", help="Duration range: short, medium, long")
+    parser.add_argument("--max-clips", type=int, default=1, help="Maximum clips to generate")
+    parser.add_argument("--duration", type=str, default="short", help="Duration range: short, medium, long")
     parser.add_argument("--version", type=str, default="", help="Version suffix for downloaded files")
     parser.add_argument("--analyze-only", type=str, help="Only analyze log for given job ID")
     
