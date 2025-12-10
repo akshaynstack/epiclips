@@ -338,7 +338,11 @@ class Settings(BaseSettings):
 
     # Performance tuning (configurable for ECS scaling)
     max_workers: int = 4  # Max concurrent jobs (set to vCPU count for optimal performance)
-    max_render_workers: int = 3  # Max concurrent FFmpeg render processes
+    max_render_workers: int = 2  # Max concurrent FFmpeg render processes (reduced for 8GB Fargate)
+
+    # Fargate optimization mode (for 4 vCPU / 8 GB RAM containers)
+    # When True, applies memory-conservative settings to prevent OOM on long videos
+    fargate_mode: bool = True  # Enable for Fargate/ECS deployment
 
     # ============================================================
     # HARDCODED SETTINGS (not configurable via env vars)
@@ -355,7 +359,11 @@ class Settings(BaseSettings):
 
     @property
     def max_concurrent_renders(self) -> int:
-        return self.max_render_workers  # Use configurable env var
+        # Fargate mode: sequential renders to avoid 100% CPU spikes
+        # Normal mode: use configured value (default 2)
+        if self.fargate_mode:
+            return 1
+        return self.max_render_workers
 
     @property
     def temp_directory(self) -> str:
@@ -425,7 +433,22 @@ class Settings(BaseSettings):
 
     @property
     def max_frames_per_vision_batch(self) -> int:
-        return 48
+        # Reduce batch size on Fargate to limit memory usage (~32 frames = ~600MB base64)
+        return 32 if self.fargate_mode else 48
+
+    # Face tracking FPS (frames per second for face tracking)
+    # Lower = less CPU usage, still accurate for tracking (faces don't move that fast)
+    @property
+    def face_tracking_fps(self) -> float:
+        # 3.0 FPS in Fargate mode (vs 5.0) - 40% fewer frames, still precise for face tracking
+        return 3.0 if self.fargate_mode else 5.0
+
+    # Detection workers (parallel clip detection)
+    # Lower = smoother CPU, but slower total time
+    @property
+    def detection_workers(self) -> int:
+        # 2 workers in Fargate mode (vs 4) - prevents CPU spike from 4 parallel MediaPipe
+        return 2 if self.fargate_mode else 4
 
     # Rendering Configuration
     @property

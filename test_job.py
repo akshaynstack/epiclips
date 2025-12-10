@@ -31,7 +31,7 @@ load_dotenv()
 # Configuration
 BASE_URL = "http://localhost:8000"
 API_KEY = "your-api-key"
-TEST_VIDEO_URL = "https://www.youtube.com/watch?v=QpgjzP6cBFA"  # Test video with layout transitions
+TEST_VIDEO_URL = "https://www.youtube.com/watch?v=w1wNajAY3Ho"  # Test video with layout transitions
 
 # AWS Configuration from .env
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -298,8 +298,8 @@ Examples:
   python test_job.py --version _test1
         """
     )
-    parser.add_argument("--max-clips", type=int, default=1, help="Maximum clips to generate")
-    parser.add_argument("--duration", type=str, default="short", help="Duration range: short, medium, long")
+    parser.add_argument("--max-clips", type=int, default=3, help="Maximum clips to generate")
+    parser.add_argument("--duration", type=str, default="medium", help="Duration range: short, medium, long")
     parser.add_argument("--version", type=str, default="", help="Version suffix for downloaded files")
     parser.add_argument("--analyze-only", type=str, help="Only analyze log for given job ID")
     

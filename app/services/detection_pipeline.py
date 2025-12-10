@@ -144,6 +144,8 @@ class DetectionPipeline:
         
         def _sync_process_video() -> dict:
             """Synchronous video processing - runs in thread pool."""
+            import gc  # Import here to avoid circular dependencies
+            
             try:
                 # Open video
                 cap = cv2.VideoCapture(video_path)
@@ -159,8 +161,11 @@ class DetectionPipeline:
                 end_sec = end_time_ms / 1000
                 
                 frames_data = []
-                all_raw_detections = []  # For cross-frame outlier filtering
+                # Store only bbox tuples for outlier filtering (not full FaceDetectionResult objects)
+                # This saves ~90% memory compared to storing full detection objects
+                all_bbox_tuples = []  # List of (bbox_tuple, confidence, method) for outlier filtering
                 current_time = start_sec
+                frames_processed = 0
                 
                 logger.info(f"Processing local video: {start_sec:.1f}s - {end_sec:.1f}s, interval={frame_interval_seconds}s")
                 
@@ -176,7 +181,6 @@ class DetectionPipeline:
                     
                     # Run face detection with multi-tier fallback
                     face_detections = []
-                    raw_detections = []
                     try:
                         face_result = self.face_detector.detect_faces(
                             frame,
@@ -184,10 +188,8 @@ class DetectionPipeline:
                             timestamp_ms=int(current_time * 1000),
                         )
                         if face_result and face_result.detections:
-                            raw_detections = face_result.detections
-                            
-                            # Convert to dict format for frame data
-                            for det in raw_detections:
+                            # Convert to dict format for frame data and store bbox tuples
+                            for det in face_result.detections:
                                 bbox = det.bbox
                                 face_detections.append({
                                     "bbox": {
@@ -199,12 +201,14 @@ class DetectionPipeline:
                                     "confidence": det.confidence,
                                     "detection_method": det.detection_method,
                                 })
+                                # Store lightweight tuple for outlier filtering
+                                all_bbox_tuples.append((bbox, det.confidence, det.detection_method))
                                 
                     except Exception as e:
                         logger.warning(f"Face detection failed at {current_time:.1f}s: {e}")
                     
-                    # Store for cross-frame outlier filtering
-                    all_raw_detections.extend(raw_detections)
+                    # Explicitly release frame memory after detection
+                    del frame
                     
                     frames_data.append({
                         "timestamp_sec": current_time,
@@ -213,15 +217,27 @@ class DetectionPipeline:
                     })
                     
                     current_time += frame_interval_seconds
+                    frames_processed += 1
+                    
+                    # Periodic GC for long videos (every 100 frames)
+                    if frames_processed % 100 == 0:
+                        gc.collect()
+                        logger.debug(f"Detection progress: {frames_processed} frames processed")
                 
                 cap.release()
                 
-                # Apply cross-frame outlier filtering
-                if all_raw_detections and len(all_raw_detections) >= 3:
-                    filtered_detections = self.face_detector.filter_outliers(all_raw_detections)
+                # Apply cross-frame outlier filtering using lightweight tuples
+                if all_bbox_tuples and len(all_bbox_tuples) >= 3:
+                    # Reconstruct minimal detection objects for outlier filtering
+                    from app.services.face_detector import FaceDetectionResult
+                    temp_detections = [
+                        FaceDetectionResult(bbox=bbox, confidence=conf, detection_method=method)
+                        for bbox, conf, method in all_bbox_tuples
+                    ]
+                    filtered_detections = self.face_detector.filter_outliers(temp_detections)
                     
-                    if len(filtered_detections) < len(all_raw_detections):
-                        logger.info(f"Outlier filtering: {len(all_raw_detections)} -> {len(filtered_detections)} detections")
+                    if len(filtered_detections) < len(temp_detections):
+                        logger.info(f"Outlier filtering: {len(temp_detections)} -> {len(filtered_detections)} detections")
                         
                         # Build set of valid bbox tuples for quick lookup
                         valid_bboxes = set(det.bbox for det in filtered_detections)
@@ -232,6 +248,14 @@ class DetectionPipeline:
                                 d for d in frame_data["detections"]
                                 if (d["bbox"]["x"], d["bbox"]["y"], d["bbox"]["width"], d["bbox"]["height"]) in valid_bboxes
                             ]
+                    
+                    # Clean up temp objects
+                    del temp_detections
+                    del filtered_detections
+                
+                # Clear bbox tuples
+                del all_bbox_tuples
+                gc.collect()
                 
                 processing_time = time.time() - start_time
                 total_faces = sum(len(f['detections']) for f in frames_data)
@@ -387,6 +411,16 @@ class DetectionPipeline:
                         total_poses += len(tracked_poses)
 
                 frame_detections.append(frame_result)
+                
+                # Release frame memory immediately after processing
+                del frame
+                
+                # Delete frame file from disk to save space (optional cleanup)
+                try:
+                    if os.path.exists(frame_info.file_path):
+                        os.remove(frame_info.file_path)
+                except OSError:
+                    pass  # Non-critical, will be cleaned up with work_dir
 
             # Step 5: Generate track summaries
             track_summaries = self._generate_track_summaries()

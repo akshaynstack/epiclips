@@ -174,19 +174,33 @@ class IntelligencePlannerService:
             transcript,
         )
         
-        # Call Gemini via OpenRouter
+        # Call Gemini via OpenRouter with retry for JSON parsing failures
         logger.info(f"Calling Gemini ({self.settings.gemini_model}) for clip planning...")
         
-        response = await self._call_openrouter(
-            model=self.settings.gemini_model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=8000,
-            response_format={"type": "json_object"},
-        )
+        max_retries = 3
+        last_error = None
         
-        # Parse response
-        return self._parse_clip_plan_response(response)
+        for attempt in range(max_retries):
+            response = await self._call_openrouter(
+                model=self.settings.gemini_model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=8000,
+                response_format={"type": "json_object"},
+            )
+            
+            try:
+                # Parse response
+                return self._parse_clip_plan_response(response)
+            except IntelligencePlanningError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    logger.warning(f"Clip planning attempt {attempt + 1} failed (JSON parse error), retrying...")
+                    import asyncio
+                    await asyncio.sleep(1)  # Brief delay before retry
+                else:
+                    logger.error(f"All {max_retries} clip planning attempts failed")
+                    raise last_error
 
     def _build_system_prompt(
         self,

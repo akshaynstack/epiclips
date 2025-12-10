@@ -760,7 +760,7 @@ class AIClippingPipeline:
                                     video_path=video_path,
                                     start_ms=segment.start_time_ms,
                                     end_ms=segment.end_time_ms,
-                                    sample_fps=5.0,  # 5 FPS for tracking
+                                    sample_fps=self.settings.face_tracking_fps,
                                     preferred_position=preferred_pos,
                                 )
                                 if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
@@ -852,7 +852,7 @@ class AIClippingPipeline:
                                     video_path=video_path,
                                     start_ms=segment.start_time_ms,
                                     end_ms=segment.end_time_ms,
-                                    sample_fps=5.0,
+                                    sample_fps=self.settings.face_tracking_fps,
                                     preferred_position=preferred_pos,
                                 )
                                 has_valid_face = False
@@ -936,7 +936,7 @@ class AIClippingPipeline:
                                 video_path=video_path,
                                 start_ms=segment.start_time_ms,
                                 end_ms=segment.end_time_ms,
-                                sample_fps=5.0,
+                                sample_fps=self.settings.face_tracking_fps,
                             )
                             if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
                                 dom_bbox = tracking_result.dominant_track.smoothed_bbox
@@ -994,9 +994,16 @@ class AIClippingPipeline:
                     ),
                 })
         
-        # Run all detection tasks in parallel
+        # Run detection tasks with limited concurrency to reduce CPU spikes
+        # Use semaphore to limit parallel detection (Fargate: 2, Normal: 4)
+        detection_semaphore = asyncio.Semaphore(self.settings.detection_workers)
+        
+        async def throttled_process(i: int, segment: ClipPlanSegment) -> tuple[int, dict]:
+            async with detection_semaphore:
+                return await process_single_clip(i, segment)
+        
         detection_tasks = [
-            process_single_clip(i, segment)
+            throttled_process(i, segment)
             for i, segment in enumerate(clip_segments)
         ]
         detection_results_list = await asyncio.gather(*detection_tasks)
