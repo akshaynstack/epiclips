@@ -14,7 +14,7 @@ from typing import Any, Literal, Optional
 import httpx
 
 from app.config import get_settings
-from app.services.transcription_service import TranscriptSegment, TranscriptionResult
+from app.services.transcription_service import TranscriptSegment, TranscriptionResult, find_sentence_end_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ class IntelligencePlannerService:
     - Identifies viral-worthy segments with timestamps
     - Assigns layout types (talking_head, screen_share)
     - Scores clips for virality potential
+    - Automatic clip count scaling based on video duration
     """
 
     def __init__(self):
@@ -82,6 +83,58 @@ class IntelligencePlannerService:
         
         if not self.settings.openrouter_api_key:
             logger.warning("OPENROUTER_API_KEY not set, intelligence planning will fail")
+
+    def calculate_optimal_clip_count(
+        self,
+        video_duration_seconds: float,
+        user_max_clips: Optional[int],
+        auto_clip_count: bool = True,
+    ) -> int:
+        """
+        Calculate optimal clip count based on video duration.
+        
+        Uses a scaled approach: longer videos get more clips, but with diminishing
+        returns to prevent excessive clips on very long videos.
+        
+        Args:
+            video_duration_seconds: Total video duration in seconds
+            user_max_clips: User-requested maximum clips (upper bound). None = use config max_clips_absolute
+            auto_clip_count: If True, auto-scale based on duration. If False, use user's max_clips directly.
+            
+        Returns:
+            Optimal number of clips to generate
+        """
+        # Use config's max_clips_absolute as default when user_max_clips is None
+        effective_max = user_max_clips if user_max_clips is not None else self.settings.max_clips_absolute
+        
+        if not auto_clip_count or not self.settings.clip_scaling_enabled:
+            # Auto-scaling disabled by request or config, use user's requested count directly
+            final_clips = min(effective_max, self.settings.max_clips_absolute)
+            logger.info(
+                f"Clip count (auto-scaling OFF): using max {effective_max} -> final: {final_clips}"
+            )
+            return final_clips
+        
+        video_duration_minutes = video_duration_seconds / 60.0
+        
+        # Calculate suggested clips based on duration
+        # Using clips_per_minute_ratio (default 0.2 = 1 clip per 5 minutes)
+        suggested_clips = int(video_duration_minutes * self.settings.clips_per_minute_ratio)
+        
+        # Apply bounds
+        suggested_clips = max(suggested_clips, self.settings.min_clips)
+        suggested_clips = min(suggested_clips, self.settings.max_clips_absolute)
+        
+        # Don't exceed user's requested maximum (if provided)
+        final_clips = min(suggested_clips, effective_max)
+        
+        logger.info(
+            f"Clip count scaling: {video_duration_minutes:.1f} min video -> "
+            f"suggested {suggested_clips} clips (ratio: {self.settings.clips_per_minute_ratio}), "
+            f"effective max: {effective_max}, final: {final_clips}"
+        )
+        
+        return final_clips
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -102,6 +155,7 @@ class IntelligencePlannerService:
         transcript_result: TranscriptionResult,
         video_metadata: Any = None,
         max_clips: int = 5,
+        auto_clip_count: bool = True,
         min_duration_seconds: int = 15,
         max_duration_seconds: int = 90,
         duration_ranges: Optional[list[str]] = None,
@@ -116,6 +170,7 @@ class IntelligencePlannerService:
             transcript_result: TranscriptionResult from transcription service
             video_metadata: Optional video metadata
             max_clips: Maximum number of clips to generate
+            auto_clip_count: If True, auto-scale clip count based on video duration
             min_duration_seconds: Minimum clip duration
             max_duration_seconds: Maximum clip duration
             duration_ranges: Optional list of selected duration ranges ('short', 'medium', 'long')
@@ -133,23 +188,35 @@ class IntelligencePlannerService:
             logger.warning("No transcript or frames provided for clip planning")
             return ClipPlanResponse(segments=[], total_clips=0, target_platform=target_platform, insights="No content provided for analysis")
 
-        clip_count = max_clips or self.settings.max_suggested_clips
+        # Calculate video duration from transcript for clip count scaling
+        video_duration_seconds = 0.0
+        if transcript:
+            video_duration_seconds = transcript[-1].end_time_ms / 1000.0
+        
+        # Apply clip count scaling algorithm
+        user_max_clips = max_clips or self.settings.max_suggested_clips
+        clip_count = self.calculate_optimal_clip_count(
+            video_duration_seconds, 
+            user_max_clips,
+            auto_clip_count=auto_clip_count,
+        )
 
         # Map user-facing layout type to internal type
         internal_layout_type = LAYOUT_TYPE_MAP.get(layout_type, "screen_share")
 
         logger.info(
             f"Planning clips: {len(transcript)} transcript segments, "
-            f"{len(frames)} frames, requesting {clip_count} clips, "
+            f"{len(frames)} frames, requesting {clip_count} clips (scaled from user max {user_max_clips}), "
             f"duration_ranges={duration_ranges}, layout_type={layout_type} (internal: {internal_layout_type})"
         )
 
-        # Store for use in response
+        # Store for use in response and sentence boundary snapping
         self._current_target_platform = target_platform
         self._current_min_duration = min_duration_seconds
         self._current_max_duration = max_duration_seconds
         self._current_duration_ranges = duration_ranges
         self._current_layout_type = internal_layout_type
+        self._current_transcript = transcript  # Store for sentence boundary snapping
         
         # Build prompts
         system_prompt = self._build_system_prompt(clip_count, min_duration_seconds, max_duration_seconds, duration_ranges)
@@ -457,14 +524,50 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
             
             # Build ClipPlanSegment objects using the user-selected layout type
             layout_type = getattr(self, '_current_layout_type', 'screen_share')
+            transcript = getattr(self, '_current_transcript', [])
+            max_duration = getattr(self, '_current_max_duration', 90)
+            
             clips = []
             for clip in valid_clips_data:
                 start_sec = clip.get("start_time", 0)
                 end_sec = clip.get("end_time", 0)
+                
+                start_time_ms = int(start_sec * 1000)
+                end_time_ms = int(end_sec * 1000)
+                
+                # Apply sentence boundary snapping to prevent cutting off mid-sentence
+                if self.settings.sentence_snapping_enabled and transcript:
+                    max_extension_ms = int(self.settings.sentence_extension_max_seconds * 1000)
+                    original_end_ms = end_time_ms
+                    
+                    # Find the nearest sentence boundary after the planned end time
+                    adjusted_end_ms = find_sentence_end_boundary(
+                        segments=transcript,
+                        timestamp_ms=end_time_ms,
+                        max_extension_ms=max_extension_ms,
+                        search_direction="forward",
+                    )
+                    
+                    # Ensure we don't exceed max clip duration
+                    max_end_ms = start_time_ms + (max_duration * 1000)
+                    if adjusted_end_ms > max_end_ms:
+                        logger.debug(
+                            f"Sentence boundary at {adjusted_end_ms}ms would exceed max duration, "
+                            f"capping at {max_end_ms}ms"
+                        )
+                        adjusted_end_ms = max_end_ms
+                    
+                    if adjusted_end_ms != original_end_ms:
+                        logger.info(
+                            f"Clip end time adjusted for sentence boundary: "
+                            f"{original_end_ms}ms -> {adjusted_end_ms}ms "
+                            f"(+{adjusted_end_ms - original_end_ms}ms)"
+                        )
+                        end_time_ms = adjusted_end_ms
 
                 clips.append(ClipPlanSegment(
-                    start_time_ms=int(start_sec * 1000),
-                    end_time_ms=int(end_sec * 1000),
+                    start_time_ms=start_time_ms,
+                    end_time_ms=end_time_ms,
                     virality_score=float(clip.get("virality_score", 0.5)),
                     layout_type=layout_type,
                     summary=clip.get("summary"),

@@ -11,6 +11,7 @@ This service orchestrates the entire AI clipping pipeline:
 """
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -32,6 +33,11 @@ from app.services.intelligence_planner import (
     ClipPlanSegment,
     IntelligencePlannerService,
 )
+from app.services.memory_monitor import (
+    force_gc,
+    log_memory_usage,
+    check_memory_pressure,
+)
 from app.services.rendering_service import (
     CropKeyframe,
     CropTimeline,
@@ -52,10 +58,7 @@ from app.services.video_downloader import (
     DownloadResult,
     VideoDownloaderService,
 )
-from app.services.content_region_detector import (
-    ContentRegionDetector,
-    FrameAnalysis,
-)
+# ContentRegionDetector removed - unused, superseded by SmartLayoutDetector
 from app.services.smart_layout_detector import (
     SmartLayoutDetector,
     LayoutAnalysis,
@@ -97,7 +100,8 @@ class ClippingJobRequest:
     job_id: Optional[str] = None
     external_job_id: Optional[str] = None  # External reference (e.g., API job ID)
     owner_user_id: Optional[str] = None  # User ID for S3 key scoping
-    max_clips: int = 5
+    max_clips: Optional[int] = None  # None = use config max_clips_absolute when auto_clip_count=True
+    auto_clip_count: bool = True  # If true, auto-scale clip count based on video duration
     min_clip_duration_seconds: int = 15
     max_clip_duration_seconds: int = 90
     duration_ranges: Optional[list[str]] = None  # ['short', 'medium', 'long']
@@ -166,7 +170,7 @@ class AIClippingPipeline:
         self.intelligence_planner = IntelligencePlannerService()
         self.rendering_service = RenderingService()
         self.s3_upload_service = S3UploadService()
-        self.content_region_detector = ContentRegionDetector()
+        # ContentRegionDetector removed - unused, superseded by SmartLayoutDetector
         self.smart_layout_detector = SmartLayoutDetector()
 
         # Current request context for webhooks (set during process_video)
@@ -306,6 +310,9 @@ class AIClippingPipeline:
             )
             logger.info(f"Downloaded: {download_result.metadata.title}")
             
+            # Memory checkpoint after download
+            log_memory_usage("after_download", job_id)
+            
             # Step 2: Transcribe audio
             self._update_progress(job_id, JobStatus.TRANSCRIBING, 15, "Transcribing audio...")
             transcription_result = await self.transcription_service.transcribe(
@@ -326,12 +333,16 @@ class AIClippingPipeline:
                 user_id=request.owner_user_id,
             )
             
+            # Memory checkpoint after transcription
+            log_memory_usage("after_transcription", job_id)
+            
             # Step 3: Plan clips using AI
             self._update_progress(job_id, JobStatus.PLANNING, 30, "Planning viral clips...")
             clip_plan = await self.intelligence_planner.plan_clips(
                 transcript_result=transcription_result,
                 video_metadata=download_result.metadata,
                 max_clips=request.max_clips,
+                auto_clip_count=request.auto_clip_count,  # Pass auto-scaling flag
                 min_duration_seconds=request.min_clip_duration_seconds,
                 max_duration_seconds=request.max_clip_duration_seconds,
                 duration_ranges=request.duration_ranges,
@@ -354,6 +365,10 @@ class AIClippingPipeline:
             
             # Step 4: Run detection for smart cropping (with speaker-driven layout)
             self._update_progress(job_id, JobStatus.DETECTING, 45, "Analyzing video for smart cropping...")
+            
+            # Force GC before detection (heaviest CPU/memory stage)
+            force_gc("before_detection", job_id)
+            
             detection_results = await self._run_detection_for_clips(
                 video_path=download_result.video_path,
                 clip_segments=clip_plan.segments,
@@ -364,6 +379,9 @@ class AIClippingPipeline:
                 enable_speaker_driven_layout=True,  # Use active speaker detection for layout
             )
             logger.info("Detection analysis complete")
+            
+            # Force GC after detection (release MediaPipe memory before rendering)
+            force_gc("after_detection", job_id)
             
             # Log layout analysis results for debugging
             for idx, clip_data in detection_results.items():
@@ -385,6 +403,11 @@ class AIClippingPipeline:
                 f"Rendering {total_clips} clips in parallel...",
                 clips_completed=0, total_clips=total_clips,
             )
+            
+            # Check memory pressure before rendering
+            if check_memory_pressure(threshold_percent=75.0):
+                logger.warning(f"[{job_id}] High memory pressure detected before rendering, reducing concurrency")
+                # Could dynamically reduce concurrent renders here if needed
             
             # Prepare render tasks for parallel execution
             # Limit concurrent FFmpeg processes to avoid memory exhaustion
@@ -524,6 +547,9 @@ class AIClippingPipeline:
             rendered_clips = [(path, segment) for _, path, segment in render_results]
             
             logger.info(f"All {len(rendered_clips)} clips rendered in parallel")
+            
+            # Force GC after rendering (release FFmpeg subprocess memory)
+            force_gc("after_rendering", job_id)
             
             # Step 6: Upload clips to S3 IN PARALLEL
             self._update_progress(

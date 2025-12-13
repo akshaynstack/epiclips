@@ -431,6 +431,38 @@ class Settings(BaseSettings):
     def max_suggested_clips(self) -> int:
         return 5
 
+    # Clip count scaling based on video duration
+    @property
+    def clip_scaling_enabled(self) -> bool:
+        """Enable automatic clip count scaling based on video duration."""
+        return True
+
+    @property
+    def clips_per_minute_ratio(self) -> float:
+        """Target clips per minute of video (e.g., 0.2 = 1 clip per 5 minutes)."""
+        return 0.2
+
+    @property
+    def min_clips(self) -> int:
+        """Minimum number of clips regardless of video length."""
+        return 2
+
+    @property
+    def max_clips_absolute(self) -> int:
+        """Hard cap on maximum clips to prevent excessive processing."""
+        return 30
+
+    # Sentence boundary snapping configuration
+    @property
+    def sentence_snapping_enabled(self) -> bool:
+        """Enable snapping clip end times to sentence boundaries."""
+        return True
+
+    @property
+    def sentence_extension_max_seconds(self) -> float:
+        """Maximum seconds to extend a clip to reach sentence boundary."""
+        return 5.0
+
     @property
     def max_frames_per_vision_batch(self) -> int:
         # Reduce batch size on Fargate to limit memory usage (~32 frames = ~600MB base64)
@@ -449,6 +481,18 @@ class Settings(BaseSettings):
     def detection_workers(self) -> int:
         # 2 workers in Fargate mode (vs 4) - prevents CPU spike from 4 parallel MediaPipe
         return 2 if self.fargate_mode else 4
+
+    # Pose estimation toggle - disabled by default for AI clipping (not used)
+    @property
+    def enable_pose_estimation(self) -> bool:
+        """
+        Enable pose estimation loading on startup.
+        
+        Pose estimation is CPU-intensive (~30-40% of detection time) but is NOT used
+        by the AI clipping pipeline. Only enable if you need the S3 detection endpoint
+        with pose keypoints.
+        """
+        return False  # Disabled by default - saves ~30-40% detection CPU
 
     # Rendering Configuration
     @property

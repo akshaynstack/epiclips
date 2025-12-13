@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from app.auth import verify_api_key
 
@@ -85,7 +85,16 @@ class ClipJobSubmitRequest(BaseModel):
 
     video_url: Optional[str] = Field(None, description="Video URL (YouTube, S3, or direct)")
     s3_key: Optional[str] = Field(None, description="S3 key (if using configured bucket)")
-    max_clips: int = Field(5, ge=1, le=20, description="Maximum number of clips to generate")
+    max_clips: Optional[int] = Field(
+        None, 
+        ge=1, 
+        le=50, 
+        description="Maximum number of clips to generate. Optional when auto_clip_count=true (uses config max_clips_absolute). Required when auto_clip_count=false."
+    )
+    auto_clip_count: bool = Field(
+        True,
+        description="If true, automatically determine optimal clip count based on video duration (1 clip per 5 min by default). max_clips becomes optional upper limit."
+    )
     min_clip_duration_seconds: Optional[int] = Field(None, ge=5, le=120, description="Minimum clip duration (legacy, use duration_ranges)")
     max_clip_duration_seconds: Optional[int] = Field(None, ge=15, le=300, description="Maximum clip duration (legacy, use duration_ranges)")
     duration_ranges: Optional[list[DurationRangeType]] = Field(
@@ -109,6 +118,13 @@ class ClipJobSubmitRequest(BaseModel):
     # For API integration - job tracking
     external_job_id: Optional[str] = Field(None, description="External job ID from calling service")
     owner_user_id: Optional[str] = Field(None, description="User ID for tracking")
+
+    @model_validator(mode='after')
+    def validate_max_clips_requirement(self) -> 'ClipJobSubmitRequest':
+        """Ensure max_clips is provided when auto_clip_count is disabled."""
+        if not self.auto_clip_count and self.max_clips is None:
+            raise ValueError("max_clips is required when auto_clip_count is false")
+        return self
 
 
 class ClipArtifactResponse(BaseModel):
@@ -502,6 +518,7 @@ async def submit_clipping_job(
         external_job_id=request.external_job_id,  # Track for webhooks
         owner_user_id=request.owner_user_id,  # Pass user ID for S3 key scoping
         max_clips=request.max_clips,
+        auto_clip_count=request.auto_clip_count,  # Pass auto-scaling flag
         min_clip_duration_seconds=min_duration,
         max_clip_duration_seconds=max_duration,
         duration_ranges=request.duration_ranges,
@@ -528,7 +545,9 @@ async def submit_clipping_job(
     )
     
     # Estimate processing time (rough heuristic)
-    estimated_minutes = 3 + (request.max_clips * 2)
+    # Use max_clips if provided, otherwise assume default of 5 for estimate
+    estimated_clip_count = request.max_clips if request.max_clips is not None else 5
+    estimated_minutes = 3 + (estimated_clip_count * 2)
     
     logger.info(f"Job {job_request.job_id} submitted for video: {video_source[:100]}...")
     

@@ -4,15 +4,24 @@ Test script for ViewCreator Genesis AI Clipping API.
 
 HIGH-PRECISION MODE: Tests 1 FPS VLM sampling with frame-accurate rendering.
 
+New Features Tested:
+- Clip count scaling based on video duration (clips_per_minute_ratio)
+- Sentence boundary detection (no more mid-sentence cutoffs)
+- Performance optimizations (PoseEstimator disabled, optimized MediaPipe)
+- Memory monitoring checkpoints
+
 Usage:
     python test_job.py                    # Submit job and wait for completion (auto-download from S3)
     python test_job.py --max-clips 3 --duration short  # Short clips for faster testing
+    python test_job.py --max-clips 20     # Test clip count scaling (will be auto-limited based on video length)
     
 Features:
 - 1 FPS VLM sampling (vs old 5-7 frames total)
 - Frame-accurate transition detection
 - Precise FFmpeg seeking
 - Auto-download from S3 using .env credentials
+- Clip count scaling based on video duration
+- Sentence boundary snapping to prevent mid-sentence cutoffs
 """
 
 import argparse
@@ -31,7 +40,7 @@ load_dotenv()
 # Configuration
 BASE_URL = "http://localhost:8000"
 API_KEY = "your-api-key"
-TEST_VIDEO_URL = "https://www.youtube.com/watch?v=w1wNajAY3Ho"  # Test video with layout transitions
+TEST_VIDEO_URL = "https://www.youtube.com/watch?v=qVW7uIQgTGQ"  # Test video with layout transitions
 
 # AWS Configuration from .env
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -44,7 +53,7 @@ OUTPUT_DIR = Path("test_clips")
 LOGS_DIR = Path("logs")
 
 
-def submit_job(max_clips: int = 3, duration_ranges: list = None):
+def submit_job(max_clips: int = None, duration_ranges: list = None, auto_clip_count: bool = True):
     """Submit a clipping job with high-precision settings."""
     if duration_ranges is None:
         duration_ranges = ["short"]
@@ -56,17 +65,29 @@ def submit_job(max_clips: int = 3, duration_ranges: list = None):
     
     payload = {
         "video_url": TEST_VIDEO_URL,
-        "max_clips": max_clips,
+        "auto_clip_count": auto_clip_count,  # If true, auto-scale based on video duration
         "duration_ranges": duration_ranges,
         "include_captions": True,
         "caption_preset": "viral_gold",
         "layout_type": "auto"  # High-precision auto-detection with 1 FPS VLM sampling
     }
     
+    # Only include max_clips if provided (optional when auto_clip_count=true)
+    if max_clips is not None:
+        payload["max_clips"] = max_clips
+    
     print(f"\n🚀 HIGH-PRECISION MODE: Submitting job")
     print(f"   Video: {TEST_VIDEO_URL}")
-    print(f"   Max clips: {max_clips}, Duration ranges: {duration_ranges}")
+    if auto_clip_count:
+        if max_clips is not None:
+            print(f"   Auto clip count: ENABLED (max_clips={max_clips} is upper limit)")
+        else:
+            print(f"   Auto clip count: ENABLED (no max limit, using config default)")
+    else:
+        print(f"   Auto clip count: DISABLED (will generate exactly {max_clips} clips)")
+    print(f"   Duration ranges: {duration_ranges}")
     print(f"   VLM Sampling: 1 FPS (frame-accurate transition detection)")
+    print(f"   Sentence snapping: Enabled (no mid-sentence cutoffs)")
     print(f"   FFmpeg: Frame-accurate seeking enabled")
     
     response = requests.post(
@@ -125,7 +146,7 @@ def poll_job_status(job_id: str, poll_interval: int = 5):
 
 
 def analyze_job_log(job_id: str):
-    """Analyze job log for high-precision metrics."""
+    """Analyze job log for high-precision metrics and new feature behavior."""
     log_files = list(LOGS_DIR.glob(f"job_{job_id}*.log"))
     
     if not log_files:
@@ -139,6 +160,10 @@ def analyze_job_log(job_id: str):
     vlm_frames = []
     transitions = []
     segments = []
+    clip_scaling_info = []
+    sentence_boundary_info = []
+    memory_info = []
+    pose_status = None
     
     with open(log_file, 'r', encoding='utf-8') as f:
         for line in f:
@@ -157,6 +182,50 @@ def analyze_job_log(job_id: str):
             # Track concatenation
             if "Segments concatenated successfully:" in line:
                 print(f"\n✅ CONCATENATION: {line.split('INFO - ')[-1].strip()}")
+            
+            # Track clip count scaling
+            if "Clip count scaling:" in line:
+                clip_scaling_info.append(line.strip())
+            
+            # Track sentence boundary snapping
+            if "Clip end time adjusted for sentence boundary:" in line or "Sentence boundary:" in line:
+                sentence_boundary_info.append(line.strip())
+            
+            # Track memory checkpoints
+            if "Memory [" in line or "GC [" in line:
+                memory_info.append(line.strip())
+            
+            # Track pose estimation status
+            if "Pose estimation DISABLED" in line:
+                pose_status = "DISABLED (CPU optimized)"
+            elif "MediaPipe pose model loaded" in line:
+                pose_status = "ENABLED"
+    
+    # Print pose estimation status
+    if pose_status:
+        print(f"\n🏃 POSE ESTIMATION: {pose_status}")
+    
+    # Print clip count scaling
+    if clip_scaling_info:
+        print(f"\n📐 CLIP COUNT SCALING:")
+        for info in clip_scaling_info:
+            print(f"   {info.split('INFO - ')[-1]}")
+    
+    # Print sentence boundary snapping
+    if sentence_boundary_info:
+        print(f"\n✂️  SENTENCE BOUNDARY SNAPPING:")
+        for info in sentence_boundary_info[:5]:  # Show first 5
+            print(f"   {info.split('INFO - ')[-1]}")
+        if len(sentence_boundary_info) > 5:
+            print(f"   ... and {len(sentence_boundary_info) - 5} more adjustments")
+    else:
+        print(f"\n✓ No sentence boundary adjustments needed (clips ended at natural breaks)")
+    
+    # Print memory checkpoints
+    if memory_info:
+        print(f"\n💾 MEMORY CHECKPOINTS:")
+        for info in memory_info[-6:]:  # Show last 6 (most relevant)
+            print(f"   {info.split('INFO - ')[-1]}")
     
     # Print VLM sampling stats
     if vlm_frames:
@@ -292,14 +361,25 @@ High-Precision Features:
   - Smooth segment concatenation (no frame gaps/overlaps)
   - Auto-download from S3 using .env credentials
   
+New Optimizations:
+  - Clip count scaling based on video duration (1 clip per 5 min by default)
+  - Sentence boundary snapping (prevents mid-sentence cutoffs)
+  - PoseEstimator disabled by default (saves ~30-40% CPU)
+  - Optimized dual MediaPipe (full-range as fallback only)
+  - Memory checkpoints between pipeline stages
+  
 Examples:
-  python test_job.py
-  python test_job.py --max-clips 5 --duration medium
+  python test_job.py                      # Auto clip count (backend decides based on video length)
+  python test_job.py --max-clips 50       # Auto-scale up to 50 clips max
+  python test_job.py --max-clips 5 --no-auto  # Exactly 5 clips (disable auto-scaling)
+  python test_job.py --duration medium
   python test_job.py --version _test1
         """
     )
-    parser.add_argument("--max-clips", type=int, default=3, help="Maximum clips to generate")
+    parser.add_argument("--max-clips", type=int, default=None, help="Maximum clips to generate (optional with auto mode)")
     parser.add_argument("--duration", type=str, default="medium", help="Duration range: short, medium, long")
+    parser.add_argument("--auto-clip-count", type=bool, default=True, help="Auto-scale clip count based on video duration")
+    parser.add_argument("--no-auto", action="store_true", help="Disable auto clip count scaling (use exact max-clips)")
     parser.add_argument("--version", type=str, default="", help="Version suffix for downloaded files")
     parser.add_argument("--analyze-only", type=str, help="Only analyze log for given job ID")
     
@@ -311,7 +391,8 @@ Examples:
     
     # Submit and process job
     duration_ranges = [args.duration]
-    job_id = submit_job(args.max_clips, duration_ranges)
+    auto_clip_count = not args.no_auto  # Disable if --no-auto flag is set
+    job_id = submit_job(args.max_clips, duration_ranges, auto_clip_count)
     
     if not job_id:
         return
@@ -360,10 +441,13 @@ Examples:
     print("✅ HIGH-PRECISION TEST COMPLETE")
     print("=" * 80)
     print(f"\n💡 Check logs for:")
+    print(f"   - 'Clip count scaling: X min video -> Y clips' (auto-scaling)")
+    print(f"   - 'Clip end time adjusted for sentence boundary' (no mid-sentence cuts)")
+    print(f"   - 'Memory [stage]: RSS=X MB' (memory checkpoints)")
+    print(f"   - 'GC [stage]: freed X MB' (garbage collection)")
     print(f"   - 'VLM high-precision sampling: X frames' (should be ~1 per second)")
     print(f"   - 'Layout transition detected at frame Xms' (if transitions exist)")
     print(f"   - 'Segment N rendered: ... boundary: Xms-Yms' (exact boundaries)")
-    print(f"   - 'Segments concatenated successfully' (no gaps/overlaps)")
 
 
 if __name__ == "__main__":

@@ -47,6 +47,115 @@ class TranscriptionResult:
     model: str = "whisper-large-v3-turbo"
 
 
+# Sentence-ending punctuation marks
+SENTENCE_END_PUNCTUATION = {'.', '!', '?', '。', '！', '？'}
+
+
+def find_sentence_end_boundary(
+    segments: list[TranscriptSegment],
+    timestamp_ms: int,
+    max_extension_ms: int = 5000,
+    search_direction: str = "forward",
+) -> int:
+    """
+    Find the nearest sentence boundary after a given timestamp.
+    
+    Uses word-level timing and punctuation detection to find natural
+    sentence endings, preventing clips from cutting off mid-sentence.
+    
+    Args:
+        segments: List of TranscriptSegment with word-level timing
+        timestamp_ms: The timestamp to search from (in milliseconds)
+        max_extension_ms: Maximum milliseconds to extend beyond timestamp (default 5000ms = 5s)
+        search_direction: "forward" to find end after timestamp, "backward" to find before
+        
+    Returns:
+        Adjusted timestamp in milliseconds at sentence boundary,
+        or original timestamp if no boundary found within max_extension
+    """
+    if not segments:
+        return timestamp_ms
+    
+    # Collect all words with their timing from segments that might contain our timestamp
+    candidate_words: list[tuple[str, int]] = []  # (word, end_time_ms)
+    
+    for segment in segments:
+        # Only consider segments that could contain words near our timestamp
+        segment_start = segment.start_time_ms
+        segment_end = segment.end_time_ms
+        
+        if search_direction == "forward":
+            # For forward search, look at segments from timestamp onwards
+            if segment_end < timestamp_ms:
+                continue
+            if segment_start > timestamp_ms + max_extension_ms:
+                break
+        else:
+            # For backward search, look at segments before timestamp
+            if segment_start > timestamp_ms:
+                continue
+            if segment_end < timestamp_ms - max_extension_ms:
+                continue
+        
+        # If segment has word-level timing, use it
+        if segment.words:
+            for word in segment.words:
+                candidate_words.append((word.word, word.end_time_ms))
+        else:
+            # Fall back to segment-level: treat segment text as ending at segment end
+            # Check if segment text ends with sentence punctuation
+            text = segment.text.strip()
+            if text:
+                candidate_words.append((text, segment_end))
+    
+    if not candidate_words:
+        return timestamp_ms
+    
+    if search_direction == "forward":
+        # Find first sentence boundary after timestamp within max_extension
+        for word, end_time in candidate_words:
+            if end_time < timestamp_ms:
+                continue
+            if end_time > timestamp_ms + max_extension_ms:
+                # Exceeded max extension, return original
+                logger.debug(
+                    f"Sentence boundary: no boundary found within {max_extension_ms}ms of {timestamp_ms}ms, "
+                    f"using original timestamp"
+                )
+                return timestamp_ms
+            
+            # Check if word ends with sentence punctuation
+            word_stripped = word.rstrip()
+            if word_stripped and word_stripped[-1] in SENTENCE_END_PUNCTUATION:
+                logger.debug(
+                    f"Sentence boundary: found end at {end_time}ms (word: '{word_stripped}'), "
+                    f"extended from {timestamp_ms}ms by {end_time - timestamp_ms}ms"
+                )
+                return end_time
+    else:
+        # For backward search, find last sentence boundary before timestamp
+        last_boundary = None
+        for word, end_time in candidate_words:
+            if end_time > timestamp_ms:
+                continue
+            if end_time < timestamp_ms - max_extension_ms:
+                continue
+            
+            word_stripped = word.rstrip()
+            if word_stripped and word_stripped[-1] in SENTENCE_END_PUNCTUATION:
+                last_boundary = end_time
+        
+        if last_boundary is not None:
+            logger.debug(
+                f"Sentence boundary (backward): found end at {last_boundary}ms, "
+                f"adjusted from {timestamp_ms}ms"
+            )
+            return last_boundary
+    
+    # No sentence boundary found, return original
+    return timestamp_ms
+
+
 class TranscriptionService:
     """
     Service for transcribing audio using Whisper models via Groq.

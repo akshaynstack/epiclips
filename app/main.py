@@ -92,17 +92,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     logger.info("Face detector loaded successfully (MediaPipe + Haar Cascade)")
 
-    logger.info("Loading MediaPipe pose estimation model...")
-    pose_estimator = PoseEstimator(
-        confidence_threshold=settings.pose_confidence_threshold,
-    )
-    logger.info("MediaPipe model loaded successfully")
+    # Conditionally load pose estimation (disabled by default for AI clipping - not used)
+    if settings.enable_pose_estimation:
+        logger.info("Loading MediaPipe pose estimation model...")
+        pose_estimator = PoseEstimator(
+            confidence_threshold=settings.pose_confidence_threshold,
+        )
+        logger.info("MediaPipe pose model loaded successfully")
+    else:
+        pose_estimator = None
+        logger.info("Pose estimation DISABLED (enable_pose_estimation=False) - saves ~30-40% CPU")
 
     # Initialize detection pipeline (used by AI clipping)
     logger.info("Initializing detection pipeline...")
     detection_pipeline = DetectionPipeline(
         face_detector=face_detector,
-        pose_estimator=pose_estimator,
+        pose_estimator=pose_estimator,  # Can be None if pose disabled
     )
     logger.info("Detection pipeline initialized")
 

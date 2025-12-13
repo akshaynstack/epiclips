@@ -60,7 +60,7 @@ class DetectionPipeline:
     def __init__(
         self,
         face_detector: FaceDetector,
-        pose_estimator: PoseEstimator,
+        pose_estimator: Optional[PoseEstimator] = None,
         s3_client: Optional[S3Client] = None,
     ):
         """
@@ -68,17 +68,20 @@ class DetectionPipeline:
         
         Args:
             face_detector: Face detection service
-            pose_estimator: Pose estimation service
+            pose_estimator: Pose estimation service (optional - can be None to skip pose detection)
             s3_client: S3 client (optional, for downloading/uploading)
         """
         self.face_detector = face_detector
-        self.pose_estimator = pose_estimator
+        self.pose_estimator = pose_estimator  # Can be None - pose detection will be skipped
         self.s3_client = s3_client or S3Client()
         self.frame_extractor = FrameExtractor()
         self.tracker = ObjectTracker()
         
         settings = get_settings()
         self.temp_directory = settings.temp_directory
+        
+        if self.pose_estimator is None:
+            logger.info("DetectionPipeline initialized without pose estimator - pose detection disabled")
 
     async def process_video(
         self,
@@ -377,8 +380,8 @@ class DetectionPipeline:
                         
                         total_faces += len(tracked_faces)
 
-                # Pose detection
-                if config.detect_poses:
+                # Pose detection (skip if pose_estimator is None)
+                if config.detect_poses and self.pose_estimator is not None:
                     pose_result = self.pose_estimator.estimate_pose(
                         frame,
                         frame_info.index,
