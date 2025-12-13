@@ -469,11 +469,13 @@ class Settings(BaseSettings):
         return 32 if self.fargate_mode else 48
 
     # Face tracking FPS (frames per second for face tracking)
-    # Lower = less CPU usage, still accurate for tracking (faces don't move that fast)
+    # Higher = more precise tracking, but more CPU usage
+    # 3 FPS = coarse (333ms gaps), 5 FPS = standard, 10 FPS = high precision, 15+ FPS = maximum
     @property
     def face_tracking_fps(self) -> float:
-        # 3.0 FPS in Fargate mode (vs 5.0) - 40% fewer frames, still precise for face tracking
-        return 3.0 if self.fargate_mode else 5.0
+        # 10.0 FPS for high-precision face tracking (every 100ms)
+        # Catches fast head movements and ensures smooth crop following
+        return 10.0
 
     # Detection workers (parallel clip detection)
     # Lower = smoother CPU, but slower total time
