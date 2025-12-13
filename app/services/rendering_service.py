@@ -499,27 +499,30 @@ class RenderingService:
                 # Use default webcam overlay size estimate
                 webcam_size = int(min(source_w, source_h) * 0.25)
         
-        # TIGHT FACE CROP: Use the timeline's window dimensions which are based on
-        # actual detected face size, NOT the webcam overlay size
-        # The timeline.window_width/height come from face detection in ai_clipping_pipeline
+        # TIGHT FACE CROP: For small webcam overlays, we want to crop TIGHT around
+        # the webcam box so it fills the bottom panel when scaled up
         target_aspect = target_width / target_height  # e.g., 1080/960 = 1.125
         
-        # PRIORITY 1: Use timeline dimensions if they represent actual face detection
-        # Timeline window dimensions are calculated as 2x the average face size
-        timeline_based_size = max(timeline.window_width, timeline.window_height)
-        
-        # Only use timeline dimensions if they're reasonable (actual face detection)
-        # Face-based timeline will have window < 400px typically
-        # Webcam overlay-based will be larger
-        if timeline_based_size > 0 and timeline_based_size < source_h * 0.4:
-            # Timeline has actual face-based dimensions - use them directly
-            base_size = timeline_based_size
-            logger.info(f"Using timeline-based face crop: {base_size}px (from detected faces)")
-        else:
-            # Fallback: Calculate from webcam size with tight padding
-            tight_padding = 1.2
+        # PRIORITY 1: If we have corner_facecam_bbox, use its size directly
+        # This is the most reliable source for webcam overlay size
+        if corner_facecam_bbox:
+            # Use the webcam box size with padding to get context around face
+            # Padding of 1.5x ensures we capture the head and some background
+            tight_padding = 1.5
             base_size = int(webcam_size * tight_padding)
-            logger.info(f"Using webcam-based crop: webcam={webcam_size}, base_size={base_size}")
+            logger.info(f"Using corner_facecam_bbox size: webcam={webcam_size}px -> base_size={base_size}px")
+        else:
+            # FALLBACK: Use timeline dimensions if available
+            timeline_based_size = max(timeline.window_width, timeline.window_height)
+            
+            if timeline_based_size > 0 and timeline_based_size < source_h * 0.4:
+                base_size = timeline_based_size
+                logger.info(f"Using timeline-based face crop: {base_size}px (from detected faces)")
+            else:
+                # Final fallback: Calculate from estimated webcam size
+                tight_padding = 1.2
+                base_size = int(webcam_size * tight_padding)
+                logger.info(f"Using webcam-based crop: webcam={webcam_size}, base_size={base_size}")
         
         # Minimum base_size for quality (at least 200px to avoid excessive pixelation)
         base_size = max(base_size, 200)
