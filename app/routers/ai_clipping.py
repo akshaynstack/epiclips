@@ -114,6 +114,18 @@ class ClipJobSubmitRequest(BaseModel):
         description="DEPRECATED: Layout detection is now always automatic. The AI analyzes each frame and dynamically switches between layouts mid-clip for optimal framing. This field is ignored."
     )
     callback_url: Optional[str] = Field(None, description="Webhook URL for progress updates")
+    
+    # Time range selection for processing specific portion of video
+    start_time_seconds: Optional[float] = Field(
+        None,
+        ge=0,
+        description="Start time in seconds from video beginning. If not provided, starts from 0."
+    )
+    end_time_seconds: Optional[float] = Field(
+        None,
+        ge=0,
+        description="End time in seconds from video beginning. If not provided, processes until end of video."
+    )
 
     # For API integration - job tracking
     external_job_id: Optional[str] = Field(None, description="External job ID from calling service")
@@ -124,6 +136,24 @@ class ClipJobSubmitRequest(BaseModel):
         """Ensure max_clips is provided when auto_clip_count is disabled."""
         if not self.auto_clip_count and self.max_clips is None:
             raise ValueError("max_clips is required when auto_clip_count is false")
+        return self
+    
+    @model_validator(mode='after')
+    def validate_time_range(self) -> 'ClipJobSubmitRequest':
+        """Ensure time range is valid if provided."""
+        if self.start_time_seconds is not None and self.end_time_seconds is not None:
+            if self.end_time_seconds <= self.start_time_seconds:
+                raise ValueError(
+                    f"end_time_seconds ({self.end_time_seconds}) must be greater than "
+                    f"start_time_seconds ({self.start_time_seconds})"
+                )
+            # Check minimum range (at least 60 seconds for meaningful clip generation)
+            range_duration = self.end_time_seconds - self.start_time_seconds
+            if range_duration < 30:
+                raise ValueError(
+                    f"Selected time range ({range_duration:.1f}s) is too short. "
+                    f"Minimum is 30 seconds for clip generation."
+                )
         return self
 
 
@@ -527,7 +557,15 @@ async def submit_clipping_job(
         caption_style=caption_style,
         layout_type="auto",  # Always use automatic layout detection
         callback_url=request.callback_url,
+        start_time_seconds=request.start_time_seconds,  # Time range selection
+        end_time_seconds=request.end_time_seconds,  # Time range selection
     )
+    
+    # Log time range if specified
+    if request.start_time_seconds is not None or request.end_time_seconds is not None:
+        logger.info(
+            f"Time range selection: start={request.start_time_seconds}s, end={request.end_time_seconds}s"
+        )
     
     # Initialize progress
     _job_store[job_request.job_id] = ClippingJobProgress(

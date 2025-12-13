@@ -9,11 +9,14 @@ New Features Tested:
 - Sentence boundary detection (no more mid-sentence cutoffs)
 - Performance optimizations (PoseEstimator disabled, optimized MediaPipe)
 - Memory monitoring checkpoints
+- Time range selection (start_time_seconds, end_time_seconds)
+- Strict duration range enforcement
 
 Usage:
     python test_job.py                    # Submit job and wait for completion (auto-download from S3)
     python test_job.py --max-clips 3 --duration short  # Short clips for faster testing
     python test_job.py --max-clips 20     # Test clip count scaling (will be auto-limited based on video length)
+    python test_job.py --start-time 300 --end-time 900  # Process only 5:00-15:00 of video
     
 Features:
 - 1 FPS VLM sampling (vs old 5-7 frames total)
@@ -22,6 +25,8 @@ Features:
 - Auto-download from S3 using .env credentials
 - Clip count scaling based on video duration
 - Sentence boundary snapping to prevent mid-sentence cutoffs
+- Time range selection for processing specific portions of video
+- Strict duration range enforcement (clips match selected ranges)
 """
 
 import argparse
@@ -40,7 +45,7 @@ load_dotenv()
 # Configuration
 BASE_URL = "http://localhost:8000"
 API_KEY = "your-api-key"
-TEST_VIDEO_URL = "https://www.youtube.com/watch?v=qVW7uIQgTGQ"  # Test video with layout transitions
+TEST_VIDEO_URL = "https://www.youtube.com/watch?v=7Db0glQPlFs"  # Test video with layout transitions
 
 # AWS Configuration from .env
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
@@ -53,7 +58,8 @@ OUTPUT_DIR = Path("test_clips")
 LOGS_DIR = Path("logs")
 
 
-def submit_job(max_clips: int = None, duration_ranges: list = None, auto_clip_count: bool = True):
+def submit_job(max_clips: int = None, duration_ranges: list = None, auto_clip_count: bool = True,
+               start_time_seconds: float = None, end_time_seconds: float = None):
     """Submit a clipping job with high-precision settings."""
     if duration_ranges is None:
         duration_ranges = ["short"]
@@ -76,6 +82,12 @@ def submit_job(max_clips: int = None, duration_ranges: list = None, auto_clip_co
     if max_clips is not None:
         payload["max_clips"] = max_clips
     
+    # Add time range selection if provided
+    if start_time_seconds is not None:
+        payload["start_time_seconds"] = start_time_seconds
+    if end_time_seconds is not None:
+        payload["end_time_seconds"] = end_time_seconds
+    
     print(f"\n🚀 HIGH-PRECISION MODE: Submitting job")
     print(f"   Video: {TEST_VIDEO_URL}")
     if auto_clip_count:
@@ -86,8 +98,18 @@ def submit_job(max_clips: int = None, duration_ranges: list = None, auto_clip_co
     else:
         print(f"   Auto clip count: DISABLED (will generate exactly {max_clips} clips)")
     print(f"   Duration ranges: {duration_ranges}")
+    
+    # Show time range if specified
+    if start_time_seconds is not None or end_time_seconds is not None:
+        start_str = f"{start_time_seconds:.0f}s" if start_time_seconds else "0s"
+        end_str = f"{end_time_seconds:.0f}s" if end_time_seconds else "end"
+        print(f"   Time range: {start_str} - {end_str}")
+    else:
+        print(f"   Time range: Full video")
+    
     print(f"   VLM Sampling: 1 FPS (frame-accurate transition detection)")
     print(f"   Sentence snapping: Enabled (no mid-sentence cutoffs)")
+    print(f"   Duration enforcement: STRICT (clips will match selected ranges)")
     print(f"   FFmpeg: Frame-accurate seeking enabled")
     
     response = requests.post(
@@ -163,6 +185,8 @@ def analyze_job_log(job_id: str):
     clip_scaling_info = []
     sentence_boundary_info = []
     memory_info = []
+    time_range_info = []
+    duration_enforcement_info = []
     pose_status = None
     
     with open(log_file, 'r', encoding='utf-8') as f:
@@ -200,6 +224,14 @@ def analyze_job_log(job_id: str):
                 pose_status = "DISABLED (CPU optimized)"
             elif "MediaPipe pose model loaded" in line:
                 pose_status = "ENABLED"
+            
+            # Track time range filtering
+            if "Time range filter:" in line or "Time range selection:" in line:
+                time_range_info.append(line.strip())
+            
+            # Track duration enforcement
+            if "Duration range enforcement:" in line or "Extended short clip" in line or "Trimmed long clip" in line:
+                duration_enforcement_info.append(line.strip())
     
     # Print pose estimation status
     if pose_status:
@@ -210,6 +242,20 @@ def analyze_job_log(job_id: str):
         print(f"\n📐 CLIP COUNT SCALING:")
         for info in clip_scaling_info:
             print(f"   {info.split('INFO - ')[-1]}")
+    
+    # Print time range filtering
+    if time_range_info:
+        print(f"\n⏱️  TIME RANGE SELECTION:")
+        for info in time_range_info:
+            print(f"   {info.split('INFO - ')[-1]}")
+    
+    # Print duration enforcement
+    if duration_enforcement_info:
+        print(f"\n📏 DURATION ENFORCEMENT:")
+        for info in duration_enforcement_info[:5]:
+            print(f"   {info.split('INFO - ')[-1]}")
+        if len(duration_enforcement_info) > 5:
+            print(f"   ... and {len(duration_enforcement_info) - 5} more adjustments")
     
     # Print sentence boundary snapping
     if sentence_boundary_info:
@@ -364,6 +410,8 @@ High-Precision Features:
 New Optimizations:
   - Clip count scaling based on video duration (1 clip per 5 min by default)
   - Sentence boundary snapping (prevents mid-sentence cutoffs)
+  - Time range selection (process only portion of video)
+  - Strict duration range enforcement (clips match selected ranges exactly)
   - PoseEstimator disabled by default (saves ~30-40% CPU)
   - Optimized dual MediaPipe (full-range as fallback only)
   - Memory checkpoints between pipeline stages
@@ -373,6 +421,7 @@ Examples:
   python test_job.py --max-clips 50       # Auto-scale up to 50 clips max
   python test_job.py --max-clips 5 --no-auto  # Exactly 5 clips (disable auto-scaling)
   python test_job.py --duration medium
+  python test_job.py --start-time 300 --end-time 900  # Process only 5:00-15:00
   python test_job.py --version _test1
         """
     )
@@ -380,6 +429,8 @@ Examples:
     parser.add_argument("--duration", type=str, default="medium", help="Duration range: short, medium, long")
     parser.add_argument("--auto-clip-count", type=bool, default=True, help="Auto-scale clip count based on video duration")
     parser.add_argument("--no-auto", action="store_true", help="Disable auto clip count scaling (use exact max-clips)")
+    parser.add_argument("--start-time", type=float, default=None, help="Start time in seconds (e.g., 300 for 5:00)")
+    parser.add_argument("--end-time", type=float, default=None, help="End time in seconds (e.g., 900 for 15:00)")
     parser.add_argument("--version", type=str, default="", help="Version suffix for downloaded files")
     parser.add_argument("--analyze-only", type=str, help="Only analyze log for given job ID")
     
@@ -392,7 +443,13 @@ Examples:
     # Submit and process job
     duration_ranges = [args.duration]
     auto_clip_count = not args.no_auto  # Disable if --no-auto flag is set
-    job_id = submit_job(args.max_clips, duration_ranges, auto_clip_count)
+    job_id = submit_job(
+        max_clips=args.max_clips, 
+        duration_ranges=duration_ranges, 
+        auto_clip_count=auto_clip_count,
+        start_time_seconds=args.start_time,
+        end_time_seconds=args.end_time
+    )
     
     if not job_id:
         return
@@ -441,13 +498,14 @@ Examples:
     print("✅ HIGH-PRECISION TEST COMPLETE")
     print("=" * 80)
     print(f"\n💡 Check logs for:")
+    print(f"   - 'Time range filter:' (if --start-time/--end-time used)")
+    print(f"   - 'Duration range enforcement:' (strict duration bounds)")
     print(f"   - 'Clip count scaling: X min video -> Y clips' (auto-scaling)")
     print(f"   - 'Clip end time adjusted for sentence boundary' (no mid-sentence cuts)")
+    print(f"   - 'Extended short clip' / 'Trimmed long clip' (duration adjustments)")
     print(f"   - 'Memory [stage]: RSS=X MB' (memory checkpoints)")
-    print(f"   - 'GC [stage]: freed X MB' (garbage collection)")
     print(f"   - 'VLM high-precision sampling: X frames' (should be ~1 per second)")
     print(f"   - 'Layout transition detected at frame Xms' (if transitions exist)")
-    print(f"   - 'Segment N rendered: ... boundary: Xms-Yms' (exact boundaries)")
 
 
 if __name__ == "__main__":

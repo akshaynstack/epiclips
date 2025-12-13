@@ -110,6 +110,9 @@ class ClippingJobRequest:
     caption_style: Optional[CaptionStyle] = None
     layout_type: str = "split_screen"  # split_screen, full_screen, talking_head
     callback_url: Optional[str] = None  # URL to receive webhook notifications
+    # Time range selection - process only a portion of the video
+    start_time_seconds: Optional[float] = None  # Start of processing range (default: 0)
+    end_time_seconds: Optional[float] = None  # End of processing range (default: end of video)
 
     def __post_init__(self):
         if self.job_id is None:
@@ -302,6 +305,13 @@ class AIClippingPipeline:
             logger.info(f"Layout type: {request.layout_type}, Include captions: {request.include_captions}")
             logger.info(f"Webhook callback URL: {self._current_callback_url or 'NOT SET'}")
             
+            # Log time range selection if specified
+            if request.start_time_seconds is not None or request.end_time_seconds is not None:
+                logger.info(
+                    f"Time range selection: start={request.start_time_seconds}s, "
+                    f"end={request.end_time_seconds}s"
+                )
+            
             # Step 1: Download video
             self._update_progress(job_id, JobStatus.DOWNLOADING, 5, "Downloading video...")
             download_result = await self.video_downloader.download_video(
@@ -309,6 +319,20 @@ class AIClippingPipeline:
                 output_dir=work_dir,
             )
             logger.info(f"Downloaded: {download_result.metadata.title}")
+            
+            # Validate time range against actual video duration
+            video_duration = download_result.metadata.duration_seconds
+            logger.info(f"Video duration: {video_duration:.1f}s ({video_duration/60:.1f} minutes)")
+            
+            # Clamp end_time_seconds to video duration if it exceeds
+            effective_end_time = request.end_time_seconds
+            if effective_end_time is not None and effective_end_time > video_duration:
+                logger.warning(
+                    f"end_time_seconds ({effective_end_time}s) exceeds video duration "
+                    f"({video_duration:.1f}s), clamping to video end"
+                )
+                effective_end_time = video_duration
+                request.end_time_seconds = effective_end_time
             
             # Memory checkpoint after download
             log_memory_usage("after_download", job_id)
@@ -348,6 +372,8 @@ class AIClippingPipeline:
                 duration_ranges=request.duration_ranges,
                 target_platform=request.target_platform,
                 layout_type=request.layout_type,
+                start_time_seconds=request.start_time_seconds,  # Time range selection
+                end_time_seconds=request.end_time_seconds,  # Time range selection
             )
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             

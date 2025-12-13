@@ -162,6 +162,8 @@ class IntelligencePlannerService:
         target_platform: str = "tiktok",
         frames: Optional[list[VisionFrame]] = None,
         layout_type: str = "split_screen",
+        start_time_seconds: Optional[float] = None,
+        end_time_seconds: Optional[float] = None,
     ) -> ClipPlanResponse:
         """
         Plan viral clips from video content.
@@ -177,6 +179,8 @@ class IntelligencePlannerService:
             target_platform: Target platform (tiktok, youtube_shorts, instagram_reels)
             frames: Optional sampled video frames for vision analysis
             layout_type: Layout type for clip rendering (split_screen, talking_head)
+            start_time_seconds: Optional start of processing range (clips only from this point)
+            end_time_seconds: Optional end of processing range (clips only until this point)
 
         Returns:
             ClipPlanResponse with identified clips
@@ -188,10 +192,43 @@ class IntelligencePlannerService:
             logger.warning("No transcript or frames provided for clip planning")
             return ClipPlanResponse(segments=[], total_clips=0, target_platform=target_platform, insights="No content provided for analysis")
 
-        # Calculate video duration from transcript for clip count scaling
+        # Store time range for validation
+        self._start_time_seconds = start_time_seconds
+        self._end_time_seconds = end_time_seconds
+        
+        # Filter transcript segments by time range if specified
+        if start_time_seconds is not None or end_time_seconds is not None:
+            start_ms = int((start_time_seconds or 0) * 1000)
+            end_ms = int((end_time_seconds or float('inf')) * 1000)
+            
+            original_count = len(transcript)
+            transcript = [
+                seg for seg in transcript
+                if seg.start_time_ms >= start_ms and seg.end_time_ms <= end_ms
+            ]
+            logger.info(
+                f"Time range filter: {start_time_seconds}s - {end_time_seconds}s, "
+                f"filtered {original_count} -> {len(transcript)} transcript segments"
+            )
+            
+            # Also filter frames by time range
+            if frames:
+                original_frame_count = len(frames)
+                frames = [
+                    f for f in frames
+                    if f.timestamp_ms >= start_ms and f.timestamp_ms <= end_ms
+                ]
+                logger.info(
+                    f"Time range filter: filtered {original_frame_count} -> {len(frames)} frames"
+                )
+
+        # Calculate video duration from filtered transcript for clip count scaling
         video_duration_seconds = 0.0
         if transcript:
-            video_duration_seconds = transcript[-1].end_time_ms / 1000.0
+            # Use the range of the filtered transcript
+            first_segment_start = transcript[0].start_time_ms / 1000.0
+            last_segment_end = transcript[-1].end_time_ms / 1000.0
+            video_duration_seconds = last_segment_end - first_segment_start
         
         # Apply clip count scaling algorithm
         user_max_clips = max_clips or self.settings.max_suggested_clips
@@ -277,21 +314,34 @@ class IntelligencePlannerService:
         duration_ranges: Optional[list[str]] = None,
     ) -> str:
         """Build the system prompt for Gemini."""
-        # Build duration guidance based on selected ranges
+        # Build strict duration guidance based on selected ranges
         duration_guidance = ""
+        strict_bounds_text = f"STRICTLY between {min_duration} and {max_duration} seconds"
+        
         if duration_ranges and len(duration_ranges) > 0:
             range_descriptions = {
-                "short": "15-30 seconds (quick, punchy clips)",
-                "medium": "30-60 seconds (moderate length clips)",
-                "long": "60-120 seconds (longer, more in-depth clips)",
+                "short": {"text": "15-30 seconds (quick, punchy clips)", "min": 15, "max": 30},
+                "medium": {"text": "30-60 seconds (moderate length clips)", "min": 30, "max": 60},
+                "long": {"text": "60-120 seconds (longer, in-depth clips)", "min": 60, "max": 120},
             }
-            selected_ranges = [range_descriptions.get(r, r) for r in duration_ranges if r in range_descriptions]
-            if selected_ranges:
+            selected_ranges = []
+            actual_min = float('inf')
+            actual_max = 0
+            for r in duration_ranges:
+                if r in range_descriptions:
+                    selected_ranges.append(range_descriptions[r]["text"])
+                    actual_min = min(actual_min, range_descriptions[r]["min"])
+                    actual_max = max(actual_max, range_descriptions[r]["max"])
+            
+            if selected_ranges and actual_min != float('inf'):
+                strict_bounds_text = f"STRICTLY between {int(actual_min)} and {int(actual_max)} seconds"
                 duration_guidance = f"""
-IMPORTANT: The user has selected the following clip length preferences:
+CRITICAL DURATION REQUIREMENTS:
+The user has selected specific clip lengths. You MUST follow these EXACTLY:
 {chr(10).join(f'- {r}' for r in selected_ranges)}
 
-When possible, distribute clips across these selected length ranges. Prioritize clips that fit naturally within these durations while maintaining high virality potential."""
+Each clip MUST be {strict_bounds_text}. Clips outside this range will be REJECTED.
+Do NOT generate clips shorter than {int(actual_min)} seconds or longer than {int(actual_max)} seconds."""
         
         return f"""You are AI-Clipping-Agent, a virality analyst that identifies the most engaging segments from long-form videos for short-form content.
 
@@ -315,12 +365,14 @@ Return exactly {clip_count} clips as a JSON object with this structure:
   "insights": "<overall analysis of the video content>"
 }}
 
-Rules:
-- Each clip should be {min_duration}-{max_duration} seconds long for optimal short-form content
+STRICT RULES:
+- DURATION: Each clip MUST be {strict_bounds_text}. This is NON-NEGOTIABLE.
+- Verify: (end_time - start_time) >= {min_duration} AND (end_time - start_time) <= {max_duration}
 - Prefer clips with strong opening hooks (first 3 seconds are critical)
-- layout_type: ALWAYS use "screen_share" for optimal vertical video format (split-screen with face close-up)
+- layout_type: ALWAYS use "screen_share" for optimal vertical video format
 - Higher virality_score = higher confidence this clip will perform well
-- Return times in SECONDS (not milliseconds)"""
+- Return times in SECONDS (not milliseconds)
+- Clips that violate the duration requirements will be REJECTED"""
 
     def _build_transcript_text(self, transcript: list) -> str:
         """Build formatted transcript text."""
@@ -498,7 +550,32 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
             
             logger.info(f"Found {len(clips_data)} clips in response before validation")
             
-            # Pre-process clips (filter invalid ones)
+            # Get duration range bounds from stored values
+            min_duration = getattr(self, '_current_min_duration', 15)
+            max_duration = getattr(self, '_current_max_duration', 90)
+            duration_ranges = getattr(self, '_current_duration_ranges', None)
+            start_time_limit = getattr(self, '_start_time_seconds', None)
+            end_time_limit = getattr(self, '_end_time_seconds', None)
+            
+            # Calculate strict bounds from duration_ranges if provided
+            if duration_ranges and len(duration_ranges) > 0:
+                range_config = {
+                    "short": {"min": 15, "max": 30},
+                    "medium": {"min": 30, "max": 60},
+                    "long": {"min": 60, "max": 120},
+                }
+                strict_min = float('inf')
+                strict_max = 0
+                for r in duration_ranges:
+                    if r in range_config:
+                        strict_min = min(strict_min, range_config[r]["min"])
+                        strict_max = max(strict_max, range_config[r]["max"])
+                if strict_min != float('inf') and strict_max > 0:
+                    min_duration = strict_min
+                    max_duration = strict_max
+                    logger.info(f"Duration range enforcement: {duration_ranges} -> {min_duration}-{max_duration}s strict bounds")
+            
+            # Pre-process clips (filter invalid ones and enforce duration bounds)
             valid_clips_data = []
             for clip in clips_data:
                 start = clip.get("start_time", clip.get("startTime", clip.get("start", 0)))
@@ -512,15 +589,73 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
                 
                 duration = end - start
                 
-                if duration >= 1:  # At least 1 second
-                    valid_clips_data.append({
-                        **clip,
-                        "start_time": start,
-                        "end_time": end,
-                    })
-                    logger.info(f"Valid clip found: {start}s - {end}s (duration: {duration}s)")
+                # Skip clips that are way too short (less than 5 seconds)
+                if duration < 5:
+                    logger.warning(f"Filtering clip with duration {duration}s - too short (< 5s)")
+                    continue
+                
+                # Validate clip is within time range if specified
+                if start_time_limit is not None and start < start_time_limit:
+                    logger.warning(
+                        f"Adjusting clip start from {start}s to {start_time_limit}s (before selected range)"
+                    )
+                    start = start_time_limit
+                    duration = end - start
+                
+                if end_time_limit is not None and end > end_time_limit:
+                    logger.warning(
+                        f"Adjusting clip end from {end}s to {end_time_limit}s (after selected range)"
+                    )
+                    end = end_time_limit
+                    duration = end - start
+                
+                # Enforce duration bounds with adjustment
+                original_duration = duration
+                adjusted = False
+                
+                # If clip is too short, try to extend it
+                if duration < min_duration:
+                    extension_needed = min_duration - duration
+                    # Try to extend end time
+                    new_end = end + extension_needed
+                    # Respect end time limit if set
+                    if end_time_limit is not None and new_end > end_time_limit:
+                        new_end = end_time_limit
+                    # Check if extension is sufficient
+                    if new_end - start >= min_duration:
+                        logger.info(
+                            f"Extended short clip ({original_duration:.1f}s -> {new_end - start:.1f}s) "
+                            f"to meet minimum duration {min_duration}s"
+                        )
+                        end = new_end
+                        duration = end - start
+                        adjusted = True
+                    else:
+                        logger.warning(
+                            f"Filtering clip ({original_duration:.1f}s) - too short and cannot extend "
+                            f"to minimum {min_duration}s"
+                        )
+                        continue
+                
+                # If clip is too long, trim it
+                if duration > max_duration:
+                    logger.info(
+                        f"Trimmed long clip ({original_duration:.1f}s -> {max_duration}s) "
+                        f"to meet maximum duration {max_duration}s"
+                    )
+                    end = start + max_duration
+                    duration = max_duration
+                    adjusted = True
+                
+                valid_clips_data.append({
+                    **clip,
+                    "start_time": start,
+                    "end_time": end,
+                })
+                if adjusted:
+                    logger.info(f"Adjusted clip: {start:.1f}s - {end:.1f}s (duration: {duration:.1f}s)")
                 else:
-                    logger.warning(f"Filtering invalid clip with duration {duration}s (start={start}, end={end})")
+                    logger.info(f"Valid clip found: {start:.1f}s - {end:.1f}s (duration: {duration:.1f}s)")
             
             # Build ClipPlanSegment objects using the user-selected layout type
             layout_type = getattr(self, '_current_layout_type', 'screen_share')
