@@ -1149,8 +1149,19 @@ class RenderingService:
         include_audio: bool = True,
     ) -> None:
         """Run FFmpeg with frame-accurate seeking for precise clip extraction."""
-        start_sec = start_time_ms / 1000
-        duration_sec = duration_ms / 1000
+        # Apply audio padding to avoid cutting mid-syllable
+        # Subtract padding from start (but not below 0) and add padding to duration
+        audio_padding_ms = self.settings.audio_padding_ms
+        
+        # Adjust start time (subtract padding, but not below 0)
+        adjusted_start_ms = max(0, start_time_ms - audio_padding_ms)
+        start_adjustment = start_time_ms - adjusted_start_ms
+        
+        # Adjust duration to account for the start adjustment and add end padding
+        adjusted_duration_ms = duration_ms + start_adjustment + audio_padding_ms
+        
+        start_sec = adjusted_start_ms / 1000
+        duration_sec = adjusted_duration_ms / 1000
         
         # Frame-accurate seeking: Use -ss before -i for fast seek, then trim precisely
         # This ensures no frames are skipped at boundaries

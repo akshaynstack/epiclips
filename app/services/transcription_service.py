@@ -156,6 +156,109 @@ def find_sentence_end_boundary(
     return timestamp_ms
 
 
+def find_sentence_start_boundary(
+    segments: list[TranscriptSegment],
+    timestamp_ms: int,
+    max_adjustment_ms: int = 3000,
+) -> int:
+    """
+    Find the nearest sentence/word start boundary before a given timestamp.
+    
+    This prevents clips from starting mid-word by snapping the start time
+    to the beginning of the word or sentence that contains the timestamp.
+    
+    Args:
+        segments: List of TranscriptSegment with word-level timing
+        timestamp_ms: The timestamp to search from (in milliseconds)
+        max_adjustment_ms: Maximum milliseconds to adjust backward (default 3000ms = 3s)
+        
+    Returns:
+        Adjusted timestamp in milliseconds at word/sentence start,
+        or original timestamp if no suitable boundary found
+    """
+    if not segments:
+        return timestamp_ms
+    
+    # Collect all words with their timing from relevant segments
+    all_words: list[tuple[str, int, int]] = []  # (word, start_time_ms, end_time_ms)
+    
+    for segment in segments:
+        segment_start = segment.start_time_ms
+        segment_end = segment.end_time_ms
+        
+        # Only consider segments near our timestamp
+        if segment_end < timestamp_ms - max_adjustment_ms:
+            continue
+        if segment_start > timestamp_ms + 1000:  # Small buffer to catch current word
+            break
+        
+        if segment.words:
+            for word in segment.words:
+                all_words.append((word.word, word.start_time_ms, word.end_time_ms))
+        else:
+            # Fall back to segment-level
+            all_words.append((segment.text, segment_start, segment_end))
+    
+    if not all_words:
+        return timestamp_ms
+    
+    # Find the word that contains or is closest before the timestamp
+    best_start = None
+    best_is_sentence_start = False
+    
+    for i, (word, start_time, end_time) in enumerate(all_words):
+        # Check if this word contains our timestamp (we're cutting mid-word)
+        if start_time <= timestamp_ms <= end_time:
+            # We're in the middle of this word - snap to its start
+            logger.debug(
+                f"Start boundary: timestamp {timestamp_ms}ms is mid-word '{word}', "
+                f"snapping to word start at {start_time}ms"
+            )
+            return start_time
+        
+        # Check if this is just before our timestamp
+        if start_time < timestamp_ms and end_time <= timestamp_ms:
+            # Check if previous word ended a sentence (so this is a sentence start)
+            if i > 0:
+                prev_word = all_words[i - 1][0].rstrip()
+                if prev_word and prev_word[-1] in SENTENCE_END_PUNCTUATION:
+                    # This word starts a new sentence
+                    if timestamp_ms - start_time <= max_adjustment_ms:
+                        best_start = start_time
+                        best_is_sentence_start = True
+            
+            # If not a sentence start but within range, consider it
+            if not best_is_sentence_start and timestamp_ms - start_time <= max_adjustment_ms:
+                best_start = start_time
+    
+    # Also check if timestamp falls between words
+    for i, (word, start_time, end_time) in enumerate(all_words):
+        if start_time > timestamp_ms:
+            # This word starts after our timestamp - we should start at this word
+            if start_time - timestamp_ms <= 500:  # Within 500ms after
+                logger.debug(
+                    f"Start boundary: timestamp {timestamp_ms}ms is between words, "
+                    f"snapping to next word start at {start_time}ms"
+                )
+                return start_time
+            break
+    
+    if best_start is not None:
+        if best_is_sentence_start:
+            logger.debug(
+                f"Start boundary: found sentence start at {best_start}ms, "
+                f"adjusted from {timestamp_ms}ms (-{timestamp_ms - best_start}ms)"
+            )
+        else:
+            logger.debug(
+                f"Start boundary: snapped to word start at {best_start}ms, "
+                f"adjusted from {timestamp_ms}ms (-{timestamp_ms - best_start}ms)"
+            )
+        return best_start
+    
+    return timestamp_ms
+
+
 class TranscriptionService:
     """
     Service for transcribing audio using Whisper models via Groq.

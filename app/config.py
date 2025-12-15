@@ -439,8 +439,8 @@ class Settings(BaseSettings):
 
     @property
     def clips_per_minute_ratio(self) -> float:
-        """Target clips per minute of video (e.g., 0.2 = 1 clip per 5 minutes)."""
-        return 0.2
+        """Target clips per minute of video (e.g., 0.5 = 1 clip per 2 minutes)."""
+        return 0.5
 
     @property
     def min_clips(self) -> int:
@@ -455,13 +455,27 @@ class Settings(BaseSettings):
     # Sentence boundary snapping configuration
     @property
     def sentence_snapping_enabled(self) -> bool:
-        """Enable snapping clip end times to sentence boundaries."""
+        """Enable snapping clip start/end times to word/sentence boundaries."""
         return True
 
     @property
     def sentence_extension_max_seconds(self) -> float:
-        """Maximum seconds to extend a clip to reach sentence boundary."""
+        """Maximum seconds to extend a clip end to reach sentence boundary."""
         return 5.0
+    
+    @property
+    def start_boundary_max_adjustment_seconds(self) -> float:
+        """Maximum seconds to adjust clip start backwards to reach word boundary."""
+        return 3.0
+    
+    @property
+    def audio_padding_ms(self) -> int:
+        """
+        Audio padding in milliseconds to add before start and after end.
+        This provides a small buffer to avoid cutting mid-syllable due to 
+        timing precision issues. Applied during rendering.
+        """
+        return 150  # 150ms padding for smoother word boundaries
 
     @property
     def max_frames_per_vision_batch(self) -> int:

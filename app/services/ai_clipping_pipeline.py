@@ -643,19 +643,23 @@ class AIClippingPipeline:
             await self.s3_upload_service.upload_job_output(job_output)
             
             # Build webhook output payload with clip URLs and metadata
-            # NOTE: Only include fields expected by ViewCreator API
-            # Excluded: start_time_ms, end_time_ms, layout_type, tags (causes 400 errors)
+            # Include all clip fields - API DTO now supports these
             webhook_output = {
                 "total_clips": len(clip_artifacts),
                 "source_video_title": job_output.source_video_title,
+                "source_video_duration_seconds": job_output.source_video_duration_seconds,
                 "processing_time_seconds": processing_time,
                 "clips": [
                     {
                         "clip_index": clip.clip_index,
                         "s3_url": clip.s3_url,
                         "duration_ms": clip.duration_ms,
+                        "start_time_ms": clip.start_time_ms,
+                        "end_time_ms": clip.end_time_ms,
                         "virality_score": clip.virality_score,
+                        "layout_type": clip.layout_type,
                         "summary": clip.summary,
+                        "tags": clip.tags or [],
                     }
                     for clip in clip_artifacts
                 ],

@@ -14,7 +14,12 @@ from typing import Any, Literal, Optional
 import httpx
 
 from app.config import get_settings
-from app.services.transcription_service import TranscriptSegment, TranscriptionResult, find_sentence_end_boundary
+from app.services.transcription_service import (
+    TranscriptSegment,
+    TranscriptionResult,
+    find_sentence_end_boundary,
+    find_sentence_start_boundary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -670,12 +675,32 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
                 start_time_ms = int(start_sec * 1000)
                 end_time_ms = int(end_sec * 1000)
                 
-                # Apply sentence boundary snapping to prevent cutting off mid-sentence
+                # Apply sentence/word boundary snapping to prevent cutting off mid-word
                 if self.settings.sentence_snapping_enabled and transcript:
                     max_extension_ms = int(self.settings.sentence_extension_max_seconds * 1000)
-                    original_end_ms = end_time_ms
                     
-                    # Find the nearest sentence boundary after the planned end time
+                    # 1. Snap START time to word/sentence boundary (prevent cutting mid-word)
+                    original_start_ms = start_time_ms
+                    adjusted_start_ms = find_sentence_start_boundary(
+                        segments=transcript,
+                        timestamp_ms=start_time_ms,
+                        max_adjustment_ms=3000,  # Look up to 3 seconds back for clean start
+                    )
+                    
+                    # Ensure we don't go negative
+                    if adjusted_start_ms < 0:
+                        adjusted_start_ms = 0
+                    
+                    if adjusted_start_ms != original_start_ms:
+                        logger.info(
+                            f"Clip start time adjusted for word boundary: "
+                            f"{original_start_ms}ms -> {adjusted_start_ms}ms "
+                            f"({adjusted_start_ms - original_start_ms:+d}ms)"
+                        )
+                        start_time_ms = adjusted_start_ms
+                    
+                    # 2. Snap END time to sentence boundary (prevent cutting mid-sentence)
+                    original_end_ms = end_time_ms
                     adjusted_end_ms = find_sentence_end_boundary(
                         segments=transcript,
                         timestamp_ms=end_time_ms,

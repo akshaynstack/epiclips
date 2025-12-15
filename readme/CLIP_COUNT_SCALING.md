@@ -104,7 +104,7 @@ POST /ai-clipping/jobs
 suggested_clips = floor(video_duration_minutes × clips_per_minute_ratio)
 
 where:
-  clips_per_minute_ratio = 0.2 (default, configurable)
+  clips_per_minute_ratio = 0.5 (default, 1 clip per 2 minutes)
   
 final_clips = clamp(suggested_clips, min_clips, min(max_clips_absolute, user_max_clips))
 
@@ -119,11 +119,11 @@ where:
 | Video Duration | Suggested | With max_clips=5 | With max_clips=50 |
 |---------------|-----------|------------------|-------------------|
 | 5 minutes | 2 (min) | 2 | 2 |
-| 15 minutes | 3 | 3 | 3 |
-| 30 minutes | 6 | 5 (capped) | 6 |
-| 60 minutes | 12 | 5 (capped) | 12 |
-| 120 minutes | 24 | 5 (capped) | 24 |
-| 180 minutes | 36 → 30 | 5 (capped) | 30 (system max) |
+| 10 minutes | 5 | 5 | 5 |
+| 13 minutes | 6-7 | 5 (capped) | 6-7 |
+| 30 minutes | 15 | 5 (capped) | 15 |
+| 60 minutes | 30 | 5 (capped) | 30 (system max) |
+| 120 minutes | 60 → 30 | 5 (capped) | 30 (system max) |
 
 ---
 
@@ -157,7 +157,7 @@ Clip end time adjusted for sentence boundary: 45200ms -> 47800ms (+2600ms)
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLIP_SCALING_ENABLED` | `true` | Enable/disable auto-scaling globally |
-| `CLIPS_PER_MINUTE_RATIO` | `0.2` | Clips per minute of video (0.2 = 1 clip per 5 min) |
+| `CLIPS_PER_MINUTE_RATIO` | `0.5` | Clips per minute of video (0.5 = 1 clip per 2 min) |
 | `MIN_CLIPS` | `2` | Minimum clips even for short videos |
 | `MAX_CLIPS_ABSOLUTE` | `30` | System-wide maximum clips |
 | `SENTENCE_SNAPPING_ENABLED` | `true` | Enable sentence boundary detection |
