@@ -1836,6 +1836,7 @@ class SmartLayoutDetector:
         segments = []
         current_layout = None
         segment_start = start_ms
+        previous_timestamp_ms: Optional[int] = None
         current_webcam_pos = None
         confidences = []
         
@@ -1855,25 +1856,20 @@ class SmartLayoutDetector:
                 current_webcam_pos = frame_webcam_pos
                 confidences.append(frame_result.confidence)
             elif frame_layout != current_layout:
-                # Layout changed - use EXACT frame timestamp as boundary (no interpolation)
-                # This ensures frame-accurate transitions with 1 FPS sampling
+                # Layout changed - estimate boundary between the last sample of the
+                # previous layout and the first sample of the new layout.
                 avg_confidence = sum(confidences) / len(confidences) if confidences else 0.8
                 
-                # Use the EXACT timestamp where layout changed
-                # With 1 FPS sampling, this is accurate to 1 second
-                segment_end = frame_result.timestamp_ms
+                prev_ts = previous_timestamp_ms if previous_timestamp_ms is not None else segment_start
+                segment_end = int((prev_ts + frame_result.timestamp_ms) / 2)
                 
-                # Add a small buffer (500ms) to previous segment to avoid transition glitches
-                # This ensures we don't cut right at the moment of transition
-                transition_buffer_ms = 500
-                if segment_end > segment_start + 2000:  # Only if segment is long enough
-                    segment_end = segment_end - transition_buffer_ms
-                
-                # Ensure segment is at least 1 second and within bounds
-                segment_end = max(segment_start + 1000, min(segment_end, end_ms))
+                # Keep boundaries monotonic and within the clip range.
+                # Avoid zero-length segments; short segments are merged later.
+                min_gap_ms = 250
+                segment_end = max(segment_start + min_gap_ms, min(segment_end, end_ms))
                 
                 logger.info(
-                    f"Layout transition detected at frame {frame_result.timestamp_ms}ms: "
+                    f"Layout transition detected near {segment_end}ms: "
                     f"{current_layout} -> {frame_layout}"
                 )
                 
@@ -1909,6 +1905,8 @@ class SmartLayoutDetector:
                 confidences.append(frame_result.confidence)
                 if frame_webcam_pos:
                     current_webcam_pos = frame_webcam_pos
+
+            previous_timestamp_ms = frame_result.timestamp_ms
         
         # Add final segment
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.8

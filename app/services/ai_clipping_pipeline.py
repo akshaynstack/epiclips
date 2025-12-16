@@ -811,64 +811,49 @@ class AIClippingPipeline:
                             try:
                                 # Use VLM's detected webcam position as a hint for the tracker
                                 preferred_pos = getattr(layout_analysis, 'webcam_position', None)
-                                
-                                tracking_result = await track_faces_in_video(
-                                    video_path=video_path,
-                                    start_ms=segment.start_time_ms,
-                                    end_ms=segment.end_time_ms,
-                                    sample_fps=self.settings.face_tracking_fps,
+
+                                inferred = self._infer_corner_webcam_bbox_from_detections(
+                                    detection_frames=detection_frames,
+                                    frame_width=source_width,
+                                    frame_height=source_height,
                                     preferred_position=preferred_pos,
+                                    bbox_hint=layout_analysis.corner_facecam_bbox,
                                 )
-                                if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
-                                    dom_bbox = tracking_result.dominant_track.smoothed_bbox
-                                    dom_score = tracking_result.dominant_track.dominance_score
-                                    x, y, w, h = dom_bbox
-                                    face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
-                                    
-                                    # Check if the dominant face is actually in the requested quadrant
-                                    # (negative score means it was disqualified from position matching)
-                                    if dom_score < 0:
-                                        logger.warning(
-                                            f"Face tracking: no face in {preferred_pos} quadrant. "
-                                            f"Best match at ({x},{y}) has score {dom_score:.2f}. Using fallback bbox."
-                                        )
-                                        # Use VLM position-based fallback instead
-                                        fallback_bbox = self._estimate_webcam_bbox_from_position(
-                                            preferred_pos, source_width, source_height
-                                        )
-                                        if fallback_bbox:
-                                            layout_analysis.corner_facecam_bbox = fallback_bbox
-                                            for seg in layout_analysis.layout_segments:
-                                                if seg.layout_type == "screen_share":
-                                                    seg.corner_facecam_bbox = fallback_bbox
-                                            logger.info(f"Using VLM position-based fallback bbox: {fallback_bbox}")
-                                    # QUALITY GATE: Face must be small (< 10%) - visibility threshold removed
-                                    # When VLM detects webcam, we trust it and just validate the face is corner-sized
-                                    elif face_area_ratio < 0.10:
-                                        layout_analysis.corner_facecam_bbox = dom_bbox
-                                        for seg in layout_analysis.layout_segments:
-                                            if seg.layout_type == "screen_share":
-                                                seg.corner_facecam_bbox = dom_bbox
-                                        logger.info(
-                                            f"Face tracking found corner webcam: {w}x{h} at ({x},{y}), "
-                                            f"visibility={tracking_result.dominant_face_visibility:.1%}, "
-                                            f"preferred_pos={preferred_pos}"
-                                        )
-                                    else:
-                                        logger.warning(
-                                            f"Face tracking rejected: area_ratio={face_area_ratio:.3f} (limit 0.10) - face too large for corner webcam"
-                                        )
-                                        # Large face = not a corner webcam, but also not necessarily full_screen
-                                        # Keep the layout as is, just don't set corner_facecam_bbox
+
+                                if inferred is not None:
+                                    inferred_bbox, visibility = inferred
+                                    x, y, w, h = inferred_bbox
+                                    layout_analysis.corner_facecam_bbox = inferred_bbox
+                                    for seg in layout_analysis.layout_segments:
+                                        if seg.layout_type == "screen_share":
+                                            seg.corner_facecam_bbox = inferred_bbox
+                                    logger.info(
+                                        f"Corner webcam bbox inferred from detection frames: {w}x{h} at ({x},{y}), "
+                                        f"visibility={visibility:.1%}, preferred_pos={preferred_pos}"
+                                    )
                                 else:
-                                    # No dominant face found by FaceTracker
-                                    # If VLM already set a bbox estimate, keep it; otherwise log warning
-                                    if not layout_analysis.corner_facecam_bbox:
-                                        logger.warning(f"Clip {i}: Detected screen_share but no dominant face found. Using VLM's webcam position hint for rendering.")
-                                        # Generate a fallback bbox based on VLM's position hint
-                                        preferred_pos = getattr(layout_analysis, 'webcam_position', None)
-                                        if preferred_pos:
-                                            # Create estimated bbox based on position (bottom-right, etc.)
+                                    tracking_result = await track_faces_in_video(
+                                        video_path=video_path,
+                                        start_ms=segment.start_time_ms,
+                                        end_ms=segment.end_time_ms,
+                                        sample_fps=min(self.settings.face_tracking_fps, 5.0),
+                                        preferred_position=preferred_pos,
+                                        max_duration_ms=30_000,
+                                    )
+                                    if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
+                                        dom_bbox = tracking_result.dominant_track.smoothed_bbox
+                                        dom_score = tracking_result.dominant_track.dominance_score
+                                        x, y, w, h = dom_bbox
+                                        face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
+                                        
+                                        # Check if the dominant face is actually in the requested quadrant
+                                        # (negative score means it was disqualified from position matching)
+                                        if dom_score < 0:
+                                            logger.warning(
+                                                f"Face tracking: no face in {preferred_pos} quadrant. "
+                                                f"Best match at ({x},{y}) has score {dom_score:.2f}. Using fallback bbox."
+                                            )
+                                            # Use VLM position-based fallback instead
                                             fallback_bbox = self._estimate_webcam_bbox_from_position(
                                                 preferred_pos, source_width, source_height
                                             )
@@ -878,6 +863,42 @@ class AIClippingPipeline:
                                                     if seg.layout_type == "screen_share":
                                                         seg.corner_facecam_bbox = fallback_bbox
                                                 logger.info(f"Using VLM position-based fallback bbox: {fallback_bbox}")
+                                        # QUALITY GATE: Face must be small (< 10%) - visibility threshold removed
+                                        # When VLM detects webcam, we trust it and just validate the face is corner-sized
+                                        elif face_area_ratio < 0.10:
+                                            layout_analysis.corner_facecam_bbox = dom_bbox
+                                            for seg in layout_analysis.layout_segments:
+                                                if seg.layout_type == "screen_share":
+                                                    seg.corner_facecam_bbox = dom_bbox
+                                            logger.info(
+                                                f"Face tracking found corner webcam: {w}x{h} at ({x},{y}), "
+                                                f"visibility={tracking_result.dominant_face_visibility:.1%}, "
+                                                f"preferred_pos={preferred_pos}"
+                                            )
+                                        else:
+                                            logger.warning(
+                                                f"Face tracking rejected: area_ratio={face_area_ratio:.3f} (limit 0.10) - face too large for corner webcam"
+                                            )
+                                            # Large face = not a corner webcam, but also not necessarily full_screen
+                                            # Keep the layout as is, just don't set corner_facecam_bbox
+                                    else:
+                                        # No dominant face found by FaceTracker
+                                        # If VLM already set a bbox estimate, keep it; otherwise log warning
+                                        if not layout_analysis.corner_facecam_bbox:
+                                            logger.warning(f"Clip {i}: Detected screen_share but no dominant face found. Using VLM's webcam position hint for rendering.")
+                                            # Generate a fallback bbox based on VLM's position hint
+                                            preferred_pos = getattr(layout_analysis, 'webcam_position', None)
+                                            if preferred_pos:
+                                                # Create estimated bbox based on position (bottom-right, etc.)
+                                                fallback_bbox = self._estimate_webcam_bbox_from_position(
+                                                    preferred_pos, source_width, source_height
+                                                )
+                                                if fallback_bbox:
+                                                    layout_analysis.corner_facecam_bbox = fallback_bbox
+                                                    for seg in layout_analysis.layout_segments:
+                                                        if seg.layout_type == "screen_share":
+                                                            seg.corner_facecam_bbox = fallback_bbox
+                                                    logger.info(f"Using VLM position-based fallback bbox: {fallback_bbox}")
                             except Exception as e:
                                 logger.debug(f"Face tracking for clip {i} failed (non-critical): {e}")
                     else:
@@ -903,38 +924,63 @@ class AIClippingPipeline:
                             try:
                                 # Use VLM's detected webcam position as a hint for the tracker
                                 preferred_pos = layout_analysis.webcam_position
-                                
-                                tracking_result = await track_faces_in_video(
-                                    video_path=video_path,
-                                    start_ms=segment.start_time_ms,
-                                    end_ms=segment.end_time_ms,
-                                    sample_fps=self.settings.face_tracking_fps,
+
+                                inferred = self._infer_corner_webcam_bbox_from_detections(
+                                    detection_frames=detection_frames,
+                                    frame_width=source_width,
+                                    frame_height=source_height,
                                     preferred_position=preferred_pos,
+                                    bbox_hint=layout_analysis.corner_facecam_bbox,
                                 )
+
                                 has_valid_face = False
-                                if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
-                                    dom_bbox = tracking_result.dominant_track.smoothed_bbox
-                                    x, y, w, h = dom_bbox
+                                if inferred is not None:
+                                    inferred_bbox, visibility = inferred
+                                    x, y, w, h = inferred_bbox
                                     face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
-                                    
-                                    # QUALITY GATE: Face must be small (<10%) AND persistent (>4% visibility)
-                                    # Lowered from 20% to 4% to support static webcams that are only intermittently tracked
-                                    if face_area_ratio < 0.10 and tracking_result.dominant_face_visibility > 0.04:
+
+                                    if face_area_ratio < 0.10 and visibility > 0.04:
                                         has_valid_face = True
-                                        layout_analysis.corner_facecam_bbox = dom_bbox
+                                        layout_analysis.corner_facecam_bbox = inferred_bbox
                                         for seg in layout_analysis.layout_segments:
                                             if seg.layout_type == "screen_share":
-                                                seg.corner_facecam_bbox = dom_bbox
+                                                seg.corner_facecam_bbox = inferred_bbox
                                         logger.info(
-                                            f"Face tracking found corner webcam: {w}x{h} at ({x},{y}), "
-                                            f"visibility={tracking_result.dominant_face_visibility:.1%}, "
-                                            f"preferred_pos={preferred_pos}"
+                                            f"Corner webcam bbox inferred from detection frames: {w}x{h} at ({x},{y}), "
+                                            f"visibility={visibility:.1%}, preferred_pos={preferred_pos}"
                                         )
-                                    elif face_area_ratio < 0.10:
-                                        logger.warning(
-                                            f"Face tracking rejected: visibility={tracking_result.dominant_face_visibility:.1%} (limit 4%), "
-                                            f"bbox={dom_bbox}"
-                                        )
+                                else:
+                                    tracking_result = await track_faces_in_video(
+                                        video_path=video_path,
+                                        start_ms=segment.start_time_ms,
+                                        end_ms=segment.end_time_ms,
+                                        sample_fps=min(self.settings.face_tracking_fps, 5.0),
+                                        preferred_position=preferred_pos,
+                                        max_duration_ms=30_000,
+                                    )
+                                    if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
+                                        dom_bbox = tracking_result.dominant_track.smoothed_bbox
+                                        x, y, w, h = dom_bbox
+                                        face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
+                                        
+                                        # QUALITY GATE: Face must be small (<10%) AND persistent (>4% visibility)
+                                        # Lowered from 20% to 4% to support static webcams that are only intermittently tracked
+                                        if face_area_ratio < 0.10 and tracking_result.dominant_face_visibility > 0.04:
+                                            has_valid_face = True
+                                            layout_analysis.corner_facecam_bbox = dom_bbox
+                                            for seg in layout_analysis.layout_segments:
+                                                if seg.layout_type == "screen_share":
+                                                    seg.corner_facecam_bbox = dom_bbox
+                                            logger.info(
+                                                f"Face tracking found corner webcam: {w}x{h} at ({x},{y}), "
+                                                f"visibility={tracking_result.dominant_face_visibility:.1%}, "
+                                                f"preferred_pos={preferred_pos}"
+                                            )
+                                        elif face_area_ratio < 0.10:
+                                            logger.warning(
+                                                f"Face tracking rejected: visibility={tracking_result.dominant_face_visibility:.1%} (limit 4%), "
+                                                f"bbox={dom_bbox}"
+                                            )
 
                                 if not has_valid_face:
                                     # VLM detected screen_share but FaceTracker couldn't verify
@@ -988,37 +1034,56 @@ class AIClippingPipeline:
                     # NEW: For explicit screen_share/split_screen, run face tracking to find webcam
                     if forced_layout == "screen_share":
                         try:
-                            tracking_result = await track_faces_in_video(
-                                video_path=video_path,
-                                start_ms=segment.start_time_ms,
-                                end_ms=segment.end_time_ms,
-                                sample_fps=self.settings.face_tracking_fps,
+                            inferred = self._infer_corner_webcam_bbox_from_detections(
+                                detection_frames=detection_frames,
+                                frame_width=source_width,
+                                frame_height=source_height,
+                                preferred_position=None,
+                                bbox_hint=layout_analysis.corner_facecam_bbox,
                             )
-                            if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
-                                dom_bbox = tracking_result.dominant_track.smoothed_bbox
-                                x, y, w, h = dom_bbox
-                                face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
-                                
-                                # For explicit mode, be more lenient with face size (< 20%)
-                                if face_area_ratio < 0.20:
-                                    layout_analysis.corner_facecam_bbox = dom_bbox
-                                    layout_analysis.layout_segments[0].corner_facecam_bbox = dom_bbox
-                                    logger.info(
-                                        f"Face tracking for explicit split_screen: found face {w}x{h} at ({x},{y}), "
-                                        f"visibility={tracking_result.dominant_face_visibility:.1%}"
-                                    )
+
+                            if inferred is not None:
+                                inferred_bbox, visibility = inferred
+                                x, y, w, h = inferred_bbox
+                                layout_analysis.corner_facecam_bbox = inferred_bbox
+                                layout_analysis.layout_segments[0].corner_facecam_bbox = inferred_bbox
+                                logger.info(
+                                    f"Corner webcam bbox inferred from detection frames (explicit split_screen): {w}x{h} at ({x},{y}), "
+                                    f"visibility={visibility:.1%}"
+                                )
+                            else:
+                                tracking_result = await track_faces_in_video(
+                                    video_path=video_path,
+                                    start_ms=segment.start_time_ms,
+                                    end_ms=segment.end_time_ms,
+                                    sample_fps=min(self.settings.face_tracking_fps, 5.0),
+                                    max_duration_ms=30_000,
+                                )
+                                if tracking_result.dominant_track and tracking_result.dominant_track.smoothed_bbox:
+                                    dom_bbox = tracking_result.dominant_track.smoothed_bbox
+                                    x, y, w, h = dom_bbox
+                                    face_area_ratio = (w * h) / (source_width * source_height) if source_width > 0 and source_height > 0 else 0
+                                    
+                                    # For explicit mode, be more lenient with face size (< 20%)
+                                    if face_area_ratio < 0.20:
+                                        layout_analysis.corner_facecam_bbox = dom_bbox
+                                        layout_analysis.layout_segments[0].corner_facecam_bbox = dom_bbox
+                                        logger.info(
+                                            f"Face tracking for explicit split_screen: found face {w}x{h} at ({x},{y}), "
+                                            f"visibility={tracking_result.dominant_face_visibility:.1%}"
+                                        )
+                                    else:
+                                        # Face too large - estimate a corner region instead
+                                        logger.warning(f"Clip {i}: Face too large for split_screen ({face_area_ratio:.1%}). Estimating corner webcam.")
+                                        bbox_tuple = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
+                                        layout_analysis.corner_facecam_bbox = bbox_tuple
+                                        layout_analysis.layout_segments[0].corner_facecam_bbox = bbox_tuple
                                 else:
-                                    # Face too large - estimate a corner region instead
-                                    logger.warning(f"Clip {i}: Face too large for split_screen ({face_area_ratio:.1%}). Estimating corner webcam.")
+                                    # No dominant face found - estimate a corner region
+                                    logger.warning(f"Clip {i}: Explicit split_screen requested but no dominant face found. Estimating bottom-right webcam.")
                                     bbox_tuple = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
                                     layout_analysis.corner_facecam_bbox = bbox_tuple
                                     layout_analysis.layout_segments[0].corner_facecam_bbox = bbox_tuple
-                            else:
-                                # No dominant face found - estimate a corner region
-                                logger.warning(f"Clip {i}: Explicit split_screen requested but no dominant face found. Estimating bottom-right webcam.")
-                                bbox_tuple = self._estimate_webcam_bbox_from_position("bottom-right", source_width, source_height)
-                                layout_analysis.corner_facecam_bbox = bbox_tuple
-                                layout_analysis.layout_segments[0].corner_facecam_bbox = bbox_tuple
                         except Exception as e:
                             logger.debug(f"Face tracking for explicit layout failed (non-critical): {e}")
 
@@ -1903,6 +1968,130 @@ class AIClippingPipeline:
         # Wrap in single quotes for the filter expression
         return f"'{escaped}'"
 
+    def _infer_corner_webcam_bbox_from_detections(
+        self,
+        detection_frames: list[dict],
+        frame_width: int,
+        frame_height: int,
+        preferred_position: Optional[str] = None,
+        bbox_hint: Optional[tuple[int, int, int, int]] = None,
+    ) -> Optional[tuple[tuple[int, int, int, int], float]]:
+        """
+        Infer a stable corner webcam bbox from existing face detection frames.
+
+        This is substantially faster than running the 10 FPS FaceTracker pass and is
+        usually sufficient for screen recordings where the webcam overlay is static.
+
+        Returns:
+            (bbox, visibility) where bbox=(x, y, w, h) and visibility is the fraction
+            of frames that contained a matching candidate.
+        """
+        if not detection_frames or frame_width <= 0 or frame_height <= 0:
+            return None
+
+        frame_area = frame_width * frame_height
+        if frame_area <= 0:
+            return None
+
+        preferred = preferred_position.lower() if preferred_position else None
+        candidates: list[tuple[int, int, int, int]] = []
+
+        def _matches_preferred(center_x: float, center_y: float) -> bool:
+            if not preferred:
+                return True
+            # Use slightly tighter thresholds than strict halves to avoid ambiguous mid-frame faces.
+            left_max = frame_width * 0.55
+            right_min = frame_width * 0.45
+            top_max = frame_height * 0.55
+            bottom_min = frame_height * 0.45
+
+            if "left" in preferred and center_x > left_max:
+                return False
+            if "right" in preferred and center_x < right_min:
+                return False
+            if "top" in preferred and center_y > top_max:
+                return False
+            if "bottom" in preferred and center_y < bottom_min:
+                return False
+            return True
+
+        def _within_hint(center_x: float, center_y: float) -> bool:
+            if not bbox_hint:
+                return True
+            hint_x, hint_y, hint_w, hint_h = bbox_hint
+            if hint_w <= 0 or hint_h <= 0:
+                return True
+
+            # Expand the hint region to account for VLM estimate looseness.
+            pad_x = int(hint_w * 0.75)
+            pad_y = int(hint_h * 0.75)
+            left = max(0, hint_x - pad_x)
+            top = max(0, hint_y - pad_y)
+            right = min(frame_width, hint_x + hint_w + pad_x)
+            bottom = min(frame_height, hint_y + hint_h + pad_y)
+            return left <= center_x <= right and top <= center_y <= bottom
+
+        for frame in detection_frames:
+            faces = frame.get("detections", []) or []
+            best_bbox: Optional[tuple[int, int, int, int]] = None
+            best_score = float("-inf")
+
+            for face in faces:
+                bbox = face.get("bbox", {}) or {}
+                x = int(bbox.get("x", 0))
+                y = int(bbox.get("y", 0))
+                w = int(bbox.get("width", 0))
+                h = int(bbox.get("height", 0))
+                if w < 30 or h < 30:
+                    continue
+
+                area_ratio = (w * h) / frame_area
+                # Typical webcam overlays are small; filter aggressively to avoid large talking-head faces.
+                if area_ratio < 0.002 or area_ratio > 0.10:
+                    continue
+
+                center_x = x + (w / 2)
+                center_y = y + (h / 2)
+
+                if not _matches_preferred(center_x, center_y):
+                    continue
+                if not _within_hint(center_x, center_y):
+                    continue
+
+                confidence = float(face.get("confidence", 0.0) or 0.0)
+                # Prefer higher confidence and smaller faces (webcam overlays are tiny).
+                score = confidence - area_ratio
+                if score > best_score:
+                    best_score = score
+                    best_bbox = (x, y, w, h)
+
+            if best_bbox is not None:
+                candidates.append(best_bbox)
+
+        if len(candidates) < 3:
+            return None
+
+        visibility = len(candidates) / len(detection_frames)
+        if visibility < 0.04:
+            return None
+
+        def _median_int(values: list[int]) -> int:
+            values_sorted = sorted(values)
+            return values_sorted[len(values_sorted) // 2]
+
+        xs = [b[0] for b in candidates]
+        ys = [b[1] for b in candidates]
+        ws = [b[2] for b in candidates]
+        hs = [b[3] for b in candidates]
+
+        inferred_bbox = (
+            _median_int(xs),
+            _median_int(ys),
+            _median_int(ws),
+            _median_int(hs),
+        )
+        return (inferred_bbox, visibility)
+
     def _estimate_webcam_bbox_from_position(
         self,
         position: str,
@@ -2083,4 +2272,3 @@ class AIClippingPipeline:
         except RuntimeError as e:
             # No event loop running - log and skip
             logger.warning(f"Could not send webhook (no event loop): {e}")
-

@@ -299,7 +299,7 @@ class VideoDownloaderService:
             )
 
         logger.info(f"Downloading video from YouTube: {url}")
-        logger.info(f"Using proxy: {self.settings.ytdlp_proxy or 'None'}")
+        logger.info(f"Using proxy: {'configured' if self.settings.ytdlp_proxy else 'none'}")
         logger.info(f"rnet available: {is_rnet_available()}")
 
         # Format selectors prioritizing 1080p, then 720p, then best available
@@ -397,7 +397,7 @@ class VideoDownloaderService:
         if actual_metadata.height < 720:
             logger.warning(
                 f"WARNING: Downloaded video is only {actual_metadata.height}p! "
-                f"Expected 720p or higher. Proxy: {self.settings.ytdlp_proxy or 'None'}"
+                f"Expected 720p or higher. Proxy configured: {bool(self.settings.ytdlp_proxy)}"
             )
 
         # Preserve useful info from yt-dlp metadata (title, uploader, etc.)
@@ -670,4 +670,3 @@ class VideoDownloaderService:
 class VideoDownloadError(Exception):
     """Exception raised when video download fails."""
     pass
-

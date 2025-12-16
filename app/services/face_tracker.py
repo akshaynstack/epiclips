@@ -17,6 +17,7 @@ that tracks the MAIN person throughout the clip.
 """
 
 import logging
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
@@ -605,6 +606,8 @@ async def track_faces_in_video(
     sample_fps: float = 10.0,
     face_detector=None,
     preferred_position: Optional[str] = None,
+    max_frames: Optional[int] = None,
+    max_duration_ms: Optional[int] = None,
 ) -> TrackingResult:
     """
     Track faces throughout a video clip.
@@ -622,6 +625,8 @@ async def track_faces_in_video(
         sample_fps: Frames per second to sample
         face_detector: FaceDetector instance (will create one if not provided)
         preferred_position: Optional preferred position ("bottom-right", etc.)
+        max_frames: Optional max sampled frames to process
+        max_duration_ms: Optional maximum duration to analyze (from start_ms)
         
     Returns:
         TrackingResult with all tracking information
@@ -640,7 +645,8 @@ async def track_faces_in_video(
         return TrackingResult()
     
     try:
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        tracking_start = time.monotonic()
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -648,56 +654,69 @@ async def track_faces_in_video(
         
         if end_ms is None or end_ms > duration_ms:
             end_ms = duration_ms
+
+        if max_duration_ms is not None and max_duration_ms > 0:
+            end_ms = min(end_ms, start_ms + int(max_duration_ms))
         
         logger.info(f"Video: {frame_width}x{frame_height}, {video_fps:.1f}fps, duration={duration_ms}ms")
         
         # Initialize tracker
         tracker = FaceTracker()
-        
-        # Calculate frame interval for sampling
-        frame_interval_ms = 1000.0 / sample_fps
-        
-        current_ms = float(start_ms)
-        frame_idx = 0
+
+        if sample_fps <= 0:
+            sample_fps = 1.0
+
+        frame_step = max(1, int(round(video_fps / sample_fps))) if video_fps > 0 else 1
+        start_frame = int((start_ms / 1000.0) * video_fps) if video_fps > 0 else 0
+        end_frame = int((end_ms / 1000.0) * video_fps) if video_fps > 0 else 0
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        current_frame = start_frame
+        next_sample_frame = start_frame
         processed_frames = 0
-        
-        while current_ms < end_ms:
-            # Seek to current position
-            cap.set(cv2.CAP_PROP_POS_MSEC, current_ms)
-            ret, frame = cap.read()
-            
-            if not ret:
+
+        while current_frame < end_frame:
+            if max_frames is not None and processed_frames >= max_frames:
                 break
-            
-            # Detect faces
-            detection_result = face_detector.detect_faces(
-                frame,
-                frame_index=frame_idx,
-                timestamp_ms=int(current_ms),
-            )
-            
-            # Convert to tracker format
-            detections = [
-                (d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3], d.confidence)
-                for d in detection_result.detections
-            ]
-            
-            # Process frame
-            tracker.process_frame(
-                detections=detections,
-                frame_idx=frame_idx,
-                timestamp_ms=int(current_ms),
-                frame_width=frame_width,
-                frame_height=frame_height,
-            )
-            
-            frame_idx += 1
-            processed_frames += 1
-            current_ms += frame_interval_ms
-            
-            # Log progress every 100 frames
-            if processed_frames % 100 == 0:
-                progress = (current_ms - start_ms) / (end_ms - start_ms) * 100
+
+            if current_frame == next_sample_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                timestamp_ms = int((current_frame / video_fps) * 1000) if video_fps > 0 else 0
+
+                detection_result = face_detector.detect_faces(
+                    frame,
+                    frame_index=current_frame,
+                    timestamp_ms=timestamp_ms,
+                )
+
+                detections = [
+                    (d.bbox[0], d.bbox[1], d.bbox[2], d.bbox[3], d.confidence)
+                    for d in detection_result.detections
+                ]
+
+                tracker.process_frame(
+                    detections=detections,
+                    frame_idx=processed_frames,
+                    timestamp_ms=timestamp_ms,
+                    frame_width=frame_width,
+                    frame_height=frame_height,
+                )
+
+                processed_frames += 1
+                next_sample_frame += frame_step
+                current_frame += 1
+            else:
+                # Fast-skip frames without decoding.
+                if not cap.grab():
+                    break
+                current_frame += 1
+
+            if processed_frames > 0 and processed_frames % 100 == 0:
+                progress = (current_frame - start_frame) / max(1, (end_frame - start_frame)) * 100
                 logger.debug(f"Tracking progress: {progress:.1f}% ({processed_frames} frames)")
         
         # Get final result
@@ -707,7 +726,8 @@ async def track_faces_in_video(
             f"Tracking complete: {processed_frames} frames, "
             f"{len(result.tracks)} tracks, "
             f"dominant_track={result.dominant_track_id}, "
-            f"visibility={result.dominant_face_visibility:.1%}"
+            f"visibility={result.dominant_face_visibility:.1%}, "
+            f"time={time.monotonic() - tracking_start:.1f}s"
         )
         
         return result

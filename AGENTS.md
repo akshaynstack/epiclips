@@ -1,6 +1,23 @@
 # Repository Guidelines
 
-This guide explains how to contribute effectively to the `viewcreator-genesis` FastAPI service while staying aligned with the repository’s conventions.
+This guide explains how to contribute effectively to the `viewcreator-genesis` FastAPI service while staying aligned with the repository's conventions.
+
+## IMPORTANT: Streaming Context
+
+**This codebase is being developed on stream with live viewers.** All output from Claude Code, Cursor, or any AI assistant is visible to stream viewers in real-time.
+
+**Security Requirements:**
+- **NEVER display environment variable values in chat output** (API keys, secrets, tokens, database credentials, etc.)
+- **NEVER list, echo, or output the contents of `.env` files or environment configuration**
+- Reference environment variables by name only (e.g., "configure the GROQ_API_KEY variable")
+- Be mindful that all responses are publicly visible
+- Avoid exposing sensitive information such as:
+  - API keys (Groq, OpenRouter, AWS)
+  - S3 bucket names if they reveal internal structure
+  - Private user data or PII
+  - Internal URLs or private infrastructure details
+
+**This should not affect the quality or thoroughness of work**, but outputs must be carefully considered to protect sensitive information while still being helpful and complete.
 
 ## Project Structure & Module Organization
 - `app/` holds the application source code.
@@ -33,11 +50,6 @@ This guide explains how to contribute effectively to the `viewcreator-genesis` F
 - Write atomic commits with imperative summaries (e.g., `feat(detection): add yolo fallback`).
 - Reference linked tickets in the commit body or PR description.
 - PRs should include: purpose summary, testing results, and details on any new dependencies or env vars.
-
-## Streaming Context & Sensitive Data
-- Output is broadcast live to the user’s stream audience; double-check wording so nothing sensitive leaks into chat.
-- **NEVER** echo or enumerate environment variables, secrets (API keys), or token values in responses.
-- When in doubt, summarize sensitive configuration steps and point maintainers to secure channels for specifics.
 
 ## Security & Configuration Tips
 - Secrets live in environment variables; never hard-code keys in source.

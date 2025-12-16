@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -403,6 +404,7 @@ Respond with ONLY this JSON:
             )
         
         try:
+            analysis_start = time.monotonic()
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -410,54 +412,106 @@ Respond with ONLY this JSON:
             duration_ms = end_ms - start_ms
             duration_sec = duration_ms / 1000
             
-            # HIGH-PRECISION MODE: Sample at 1 FPS (1000ms intervals) for accurate layout detection
-            # This catches ALL layout changes and ensures smooth transitions
             if sample_count is None:
-                # Sample every second (1 FPS) for maximum accuracy
-                # Minimum 3 frames for very short clips, maximum based on duration
-                sample_count = max(3, min(int(duration_sec), 60))  # Cap at 60 frames for very long clips
+                settings = get_settings()
+
+                # VLM calls are network-bound; sampling at 1 FPS causes dozens of API calls per clip.
+                # For typical "talking_head" vs "screen_share" detection + webcam position, a small,
+                # evenly-spaced sample set is sufficient and dramatically faster.
+                #
+                # Fargate mode defaults to a smaller cap to keep latency predictable.
+                max_samples = 5 if settings.fargate_mode else 12
+                target_interval_sec = 10.0 if settings.fargate_mode else 5.0
+
+                estimated = int(duration_sec / target_interval_sec) + 2  # include start/end
+                sample_count = max(3, min(estimated, max_samples))
             
-            logger.info(f"VLM high-precision sampling: {sample_count} frames for {duration_sec:.1f}s clip (1 FPS mode)")
+            logger.info(f"VLM sampling: {sample_count} frames for {duration_sec:.1f}s clip")
             
-            # HIGH-PRECISION: Sample at exact 1-second intervals for frame-accurate detection
-            # First sample at 500ms (avoid black frames), then every 1000ms
-            if sample_count == 1:
-                sample_times = [start_ms + duration_ms // 2]
-            elif sample_count == 2:
-                # For 2 samples, use start margin and end margin
-                margin_ms = 500
-                sample_times = [start_ms + margin_ms, end_ms - margin_ms]
+            # Sample evenly across the clip (avoid exact start/end to reduce black/transition frames)
+            if duration_ms <= 0:
+                sample_times = [start_ms]
             else:
-                # Start 500ms in, then sample every 1000ms
-                margin_ms = 500
-                sample_times = [start_ms + margin_ms]
-                
-                # Add 1-second interval samples
-                for i in range(1, sample_count - 1):
-                    sample_times.append(start_ms + margin_ms + (i * 1000))
-                
-                # Last sample 500ms before end
-                sample_times.append(end_ms - margin_ms)
-                
-                # Ensure we don't exceed clip duration
-                sample_times = [t for t in sample_times if t < end_ms]
+                margin_ms = min(500, max(0, duration_ms // 10))
+                sample_start = start_ms + margin_ms
+                sample_end = end_ms - margin_ms
+
+                if sample_end <= sample_start:
+                    sample_times = [start_ms + duration_ms // 2]
+                elif sample_count <= 1:
+                    sample_times = [start_ms + duration_ms // 2]
+                else:
+                    step = (sample_end - sample_start) / (sample_count - 1)
+                    sample_times = [int(sample_start + (step * i)) for i in range(sample_count)]
+
+            # De-duplicate and clamp just in case
+            sample_times = sorted({t for t in sample_times if start_ms <= t < end_ms})
             
-            frame_results: list[VLMFrameResult] = []
-            vlm_results = []
-            
-            for sample_time in sample_times:
-                frame_pos = int((sample_time / 1000) * fps)
+            results_by_timestamp: dict[int, VLMLayoutResult] = {}
+            frame_results_by_timestamp: dict[int, VLMFrameResult] = {}
+
+            def _layout_label_from_result(result: VLMLayoutResult) -> str:
+                return "screen_share" if result.has_corner_webcam else result.layout_type
+
+            def _read_frame_at_timestamp(timestamp_ms: int) -> Optional[np.ndarray]:
+                frame_pos = int((timestamp_ms / 1000) * fps)
                 cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
                 ret, frame = cap.read()
-                
                 if not ret:
+                    return None
+                return frame
+
+            def _heuristic_label_at_timestamp(timestamp_ms: int) -> Optional[str]:
+                frame = _read_frame_at_timestamp(timestamp_ms)
+                if frame is None:
+                    return None
+                fallback = self._fallback_detection(frame, frame_width, frame_height)
+                return _layout_label_from_result(fallback)
+
+            async def _analyze_vlm_at_timestamps(
+                timestamps_ms: list[int],
+            ) -> dict[int, VLMLayoutResult]:
+                missing = [
+                    t for t in timestamps_ms
+                    if t not in results_by_timestamp and start_ms <= t < end_ms
+                ]
+                frames_to_analyze: list[tuple[int, np.ndarray]] = []
+                for t in missing:
+                    frame = _read_frame_at_timestamp(t)
+                    if frame is not None:
+                        frames_to_analyze.append((t, frame))
+
+                if frames_to_analyze:
+                    analyses = await asyncio.gather(
+                        *[
+                            self.analyze_frame(frame, frame_width, frame_height)
+                            for _, frame in frames_to_analyze
+                        ],
+                        return_exceptions=True,
+                    )
+                    for (t, _frame), analysis in zip(frames_to_analyze, analyses):
+                        if isinstance(analysis, Exception):
+                            continue
+                        results_by_timestamp[t] = analysis
+                        frame_results_by_timestamp[t] = VLMFrameResult(
+                            timestamp_ms=t,
+                            has_corner_webcam=analysis.has_corner_webcam,
+                            webcam_position=analysis.webcam_position,
+                            layout_type=analysis.layout_type,
+                            confidence=analysis.confidence,
+                            reasoning=analysis.reasoning,
+                        )
+
+                return {t: results_by_timestamp[t] for t in timestamps_ms if t in results_by_timestamp}
+            
+            for sample_time in sample_times:
+                frame = _read_frame_at_timestamp(sample_time)
+                if frame is None:
                     continue
                 
                 result = await self.analyze_frame(frame, frame_width, frame_height)
-                vlm_results.append(result)
-                
-                # Store per-frame result for transition detection
-                frame_result = VLMFrameResult(
+                results_by_timestamp[sample_time] = result
+                frame_results_by_timestamp[sample_time] = VLMFrameResult(
                     timestamp_ms=sample_time,
                     has_corner_webcam=result.has_corner_webcam,
                     webcam_position=result.webcam_position,
@@ -465,14 +519,13 @@ Respond with ONLY this JSON:
                     confidence=result.confidence,
                     reasoning=result.reasoning,
                 )
-                frame_results.append(frame_result)
                 
                 logger.info(
                     f"VLM frame {sample_time}ms: webcam={result.has_corner_webcam}, "
                     f"layout={result.layout_type}, confidence={result.confidence:.2f}"
                 )
-            
-            if not vlm_results:
+
+            if not results_by_timestamp:
                 return VLMLayoutResult(
                     has_corner_webcam=False,
                     webcam_position=None,
@@ -480,26 +533,140 @@ Respond with ONLY this JSON:
                     confidence=0.3,
                     reasoning="No frames could be analyzed",
                 )
-            
-            # DETECT TRANSITIONS: Check if layout changes between frames
-            # A transition occurs when we go from webcam -> no webcam or vice versa
-            layouts_by_frame = [
-                "screen_share" if r.has_corner_webcam else r.layout_type 
-                for r in vlm_results
-            ]
-            unique_layouts = set(layouts_by_frame)
+
+            settings = get_settings()
+            target_precision_ms = 250 if settings.fargate_mode else 200
+            max_windows_to_refine = 2 if settings.fargate_mode else 4
+            max_heuristic_steps = 10
+            max_extra_vlm_frames = 6 if settings.fargate_mode else 12
+            extra_vlm_frames_added = 0
+
+            # ------------------------------------------------------------
+            # Detect transitions from coarse samples
+            # ------------------------------------------------------------
+            sorted_timestamps = sorted(results_by_timestamp.keys())
+            sorted_results = [results_by_timestamp[t] for t in sorted_timestamps]
+            labels_by_frame = [_layout_label_from_result(r) for r in sorted_results]
+            unique_layouts = set(labels_by_frame)
             has_transitions = len(unique_layouts) > 1
-            
+
+            # ------------------------------------------------------------
+            # Adaptive refinement: only when transitions are suspected.
+            # Use cheap local heuristics to bracket the boundary, then add a
+            # couple VLM frames around the boundary for precise segmentation.
+            # ------------------------------------------------------------
             if has_transitions:
-                logger.info(
-                    f"TRANSITION DETECTED: {len(unique_layouts)} different layouts found: {unique_layouts}"
-                )
+                windows = []
+                for idx in range(1, len(sorted_timestamps)):
+                    left_ts = sorted_timestamps[idx - 1]
+                    right_ts = sorted_timestamps[idx]
+                    left_label = labels_by_frame[idx - 1]
+                    right_label = labels_by_frame[idx]
+                    if left_label == right_label:
+                        continue
+
+                    # Skip low-confidence edges; they tend to be noise.
+                    left_conf = results_by_timestamp[left_ts].confidence
+                    right_conf = results_by_timestamp[right_ts].confidence
+                    if left_conf < 0.7 or right_conf < 0.7:
+                        continue
+
+                    windows.append((left_ts, right_ts, left_label, right_label))
+
+                windows = windows[:max_windows_to_refine]
+
+                if windows:
+                    logger.info(
+                        f"VLM transitions detected; refining {len(windows)} window(s) to ~{target_precision_ms}ms precision"
+                    )
+
+                for left_ts, right_ts, left_label, right_label in windows:
+                    if extra_vlm_frames_added >= max_extra_vlm_frames:
+                        break
+
+                    lo = left_ts
+                    hi = right_ts
+
+                    # Heuristic bisection (no network).
+                    for _ in range(max_heuristic_steps):
+                        if hi - lo <= target_precision_ms:
+                            break
+
+                        mid = int((lo + hi) / 2)
+                        mid_label = _heuristic_label_at_timestamp(mid)
+                        if mid_label is None:
+                            break
+                        if mid_label == left_label:
+                            lo = mid
+                        elif mid_label == right_label:
+                            hi = mid
+                        else:
+                            break
+
+                    # Add VLM samples near the refined boundary (bounded network calls).
+                    # Use the bracket endpoints so the segmenter can interpolate.
+                    lo_missing = lo not in results_by_timestamp
+                    hi_missing = hi not in results_by_timestamp
+                    needed = int(lo_missing) + int(hi_missing)
+                    if extra_vlm_frames_added + needed > max_extra_vlm_frames:
+                        break
+                    await _analyze_vlm_at_timestamps([lo, hi])
+                    if lo_missing and lo in results_by_timestamp:
+                        extra_vlm_frames_added += 1
+                    if hi_missing and hi in results_by_timestamp:
+                        extra_vlm_frames_added += 1
+
+                    # If heuristic bracketing didn't actually bracket in VLM space,
+                    # fall back to a small VLM bisection to find a real boundary.
+                    lo_label_vlm = _layout_label_from_result(results_by_timestamp[lo])
+                    hi_label_vlm = _layout_label_from_result(results_by_timestamp[hi])
+
+                    if lo_label_vlm == hi_label_vlm:
+                        lo = left_ts
+                        hi = right_ts
+                        lo_label_vlm = left_label
+                        hi_label_vlm = right_label
+
+                    max_vlm_steps = 4
+                    for _ in range(max_vlm_steps):
+                        if extra_vlm_frames_added >= max_extra_vlm_frames:
+                            break
+                        if hi - lo <= target_precision_ms:
+                            break
+
+                        mid = int((lo + hi) / 2)
+                        if mid in results_by_timestamp:
+                            mid_label_vlm = _layout_label_from_result(results_by_timestamp[mid])
+                        else:
+                            await _analyze_vlm_at_timestamps([mid])
+                            if mid not in results_by_timestamp:
+                                break
+                            extra_vlm_frames_added += 1
+                            mid_label_vlm = _layout_label_from_result(results_by_timestamp[mid])
+
+                        if mid_label_vlm == lo_label_vlm:
+                            lo = mid
+                            lo_label_vlm = mid_label_vlm
+                        else:
+                            hi = mid
+                            hi_label_vlm = mid_label_vlm
+
+                # Recompute with refined samples.
+                sorted_timestamps = sorted(results_by_timestamp.keys())
+                sorted_results = [results_by_timestamp[t] for t in sorted_timestamps]
+                labels_by_frame = [_layout_label_from_result(r) for r in sorted_results]
+                unique_layouts = set(labels_by_frame)
+                has_transitions = len(unique_layouts) > 1
+                if has_transitions:
+                    logger.info(
+                        f"VLM refinement complete: frames={len(sorted_results)}, layouts={unique_layouts}, added={extra_vlm_frames_added}"
+                    )
             
             # Count webcam frames
-            webcam_votes = sum(1 for r in vlm_results if r.has_corner_webcam)
+            webcam_votes = sum(1 for r in sorted_results if r.has_corner_webcam)
             
             # Get most common position from frames that detected webcam
-            positions = [r.webcam_position for r in vlm_results if r.webcam_position]
+            positions = [r.webcam_position for r in sorted_results if r.webcam_position]
             if positions:
                 from collections import Counter
                 webcam_position = Counter(positions).most_common(1)[0][0]
@@ -507,7 +674,7 @@ Respond with ONLY this JSON:
                 webcam_position = None
             
             # Average confidence
-            avg_confidence = sum(r.confidence for r in vlm_results) / len(vlm_results)
+            avg_confidence = sum(r.confidence for r in sorted_results) / len(sorted_results)
             
             # Determine DOMINANT layout (for the whole clip when not using transitions)
             # If transitions exist, each segment will use its own layout
@@ -523,9 +690,10 @@ Respond with ONLY this JSON:
                 webcam_bbox = None
             
             logger.info(
-                f"VLM clip analysis: {len(vlm_results)} frames, webcam={webcam_votes > 0} ({webcam_votes}/{len(vlm_results)}), "
+                f"VLM clip analysis: {len(sorted_results)} frames, webcam={webcam_votes > 0} ({webcam_votes}/{len(sorted_results)}), "
                 f"position={webcam_position}, dominant_layout={dominant_layout}, "
-                f"has_transitions={has_transitions}, confidence={avg_confidence:.2f}"
+                f"has_transitions={has_transitions}, confidence={avg_confidence:.2f}, "
+                f"time={time.monotonic() - analysis_start:.1f}s"
             )
             
             return VLMLayoutResult(
@@ -533,9 +701,9 @@ Respond with ONLY this JSON:
                 webcam_position=webcam_position,
                 layout_type=dominant_layout,
                 confidence=avg_confidence,
-                reasoning=f"Analyzed {len(vlm_results)} frames: {webcam_votes}/{len(vlm_results)} detected webcam, transitions={has_transitions}",
+                reasoning=f"Analyzed {len(sorted_results)} frames: {webcam_votes}/{len(sorted_results)} detected webcam, transitions={has_transitions}",
                 webcam_bbox_estimate=webcam_bbox,
-                frame_results=frame_results,
+                frame_results=[frame_results_by_timestamp[t] for t in sorted_timestamps if t in frame_results_by_timestamp],
                 has_transitions=has_transitions,
             )
             
