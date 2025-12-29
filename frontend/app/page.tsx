@@ -106,7 +106,7 @@ export default function LandingPage() {
             </div>
 
             {/* Nav */}
-            <nav className="fixed top-0 inset-x-0 h-20 border-b border-white/5 bg-black/50 backdrop-blur-md z-[100]">
+            <nav className="sticky top-0 inset-x-0 h-20 border-b border-white/5 bg-black/50 backdrop-blur-md z-[100]">
                 <div className="container-wide h-full flex items-center justify-between">
                     <Link href="/" className="flex items-center gap-3 group">
                         <EpiclipsLogo />
@@ -119,7 +119,7 @@ export default function LandingPage() {
                     </div>
                     <div className="flex items-center gap-4">
                         <Link href="/editor" className="btn-primary py-2.5 px-6 text-sm">
-                            Get Started Free
+                            Get Started
                         </Link>
                     </div>
                 </div>
@@ -136,7 +136,7 @@ export default function LandingPage() {
                         >
                             <div className="badge-framer mb-12 mx-auto">
                                 <Sparkles className="w-3 h-3 text-white/60" />
-                                <span className="text-[10px] uppercase tracking-[0.3em] font-bold">Free & Unlimited</span>
+                                <span className="text-[10px] uppercase tracking-[0.3em] font-bold">On-Device AI</span>
                             </div>
 
                             <h1 className="text-7xl md:text-[110px] font-bold tracking-tighter leading-[0.85] mb-16 text-gradient px-4">
@@ -146,7 +146,7 @@ export default function LandingPage() {
                             <p className="text-xl md:text-2xl text-text-secondary max-w-3xl mx-auto mb-20 leading-relaxed font-light px-4">
                                 Automatically transform long videos into viral short-form content.
                                 <span className="text-white font-medium opacity-100 ml-2">
-                                    Free forever • No limits • No credits required
+                                    Privacy First • High Performance • Unlimited Export
                                 </span>
                             </p>
 
@@ -358,7 +358,7 @@ export default function LandingPage() {
                                 Join thousands of creators using Epiclips to scale their short-form presence.
                             </p>
                             <Link href="/editor" className="btn-primary">
-                                Get Started for Free
+                                Get Started Now
                                 <ArrowRight className="w-5 h-5" />
                             </Link>
                         </div>
@@ -383,7 +383,7 @@ export default function LandingPage() {
                             <h5 className="font-bold text-sm uppercase tracking-widest mb-6">Product</h5>
                             <ul className="space-y-4 text-sm text-text-secondary">
                                 <li><Link href="#" className="hover:text-white transition-colors">Features</Link></li>
-                                <li><Link href="#" className="hover:text-white transition-colors">Pricing</Link></li>
+                                <li><Link href="#" className="hover:text-white transition-colors">Enterprise</Link></li>
                                 <li><Link href="#" className="hover:text-white transition-colors">Showcase</Link></li>
                             </ul>
                         </div>
@@ -398,14 +398,26 @@ export default function LandingPage() {
                         <div>
                             <h5 className="font-bold text-sm uppercase tracking-widest mb-6">Social</h5>
                             <div className="flex gap-4">
-                                <Link href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
+                                <Link
+                                    href="https://x.com/akshaynceo"
+                                    target="_blank"
+                                    className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
+                                >
                                     <Twitter className="w-4 h-4" />
                                 </Link>
-                                <Link href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
-                                    <Instagram className="w-4 h-4" />
-                                </Link>
-                                <Link href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors">
+                                <Link
+                                    href="https://github.com/akshaynstack"
+                                    target="_blank"
+                                    className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
+                                >
                                     <Github className="w-4 h-4" />
+                                </Link>
+                                <Link
+                                    href="https://www.linkedin.com/in/akshaynstack/"
+                                    target="_blank"
+                                    className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
+                                >
+                                    <Linkedin className="w-4 h-4" />
                                 </Link>
                             </div>
                         </div>
