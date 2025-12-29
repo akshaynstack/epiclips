@@ -1,0 +1,82 @@
+# Epiclips
+
+Welcome to **Epiclips** - an open-source AI-powered video clipping tool that transforms long-form videos into viral short-form clips.
+
+## What is Epiclips?
+
+Epiclips automates the process of creating short-form content from long videos like podcasts, tutorials, and streams. It uses:
+
+import { Bot, User, MessageSquare, Smartphone } from 'lucide-react'
+
+<div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px', marginTop: '24px' }}>
+  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', padding: '16px', border: '1px solid #333', borderRadius: '8px' }}>
+    <Bot style={{ width: '24px', height: '24px', color: '#a855f7', flexShrink: 0 }} />
+    <div>
+      <strong>AI Analysis</strong>
+      <p style={{ fontSize: '14px', color: '#888', margin: '4px 0 0 0' }}>Gemini identifies the most viral-worthy moments</p>
+    </div>
+  </div>
+  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', padding: '16px', border: '1px solid #333', borderRadius: '8px' }}>
+    <User style={{ width: '24px', height: '24px', color: '#3b82f6', flexShrink: 0 }} />
+    <div>
+      <strong>Face Tracking</strong>
+      <p style={{ fontSize: '14px', color: '#888', margin: '4px 0 0 0' }}>MediaPipe detects and follows faces</p>
+    </div>
+  </div>
+  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', padding: '16px', border: '1px solid #333', borderRadius: '8px' }}>
+    <MessageSquare style={{ width: '24px', height: '24px', color: '#22c55e', flexShrink: 0 }} />
+    <div>
+      <strong>Auto Captions</strong>
+      <p style={{ fontSize: '14px', color: '#888', margin: '4px 0 0 0' }}>Word-by-word highlighting with customizable styles</p>
+    </div>
+  </div>
+  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', padding: '16px', border: '1px solid #333', borderRadius: '8px' }}>
+    <Smartphone style={{ width: '24px', height: '24px', color: '#f97316', flexShrink: 0 }} />
+    <div>
+      <strong>9:16 Output</strong>
+      <p style={{ fontSize: '14px', color: '#888', margin: '4px 0 0 0' }}>Perfect for TikTok, Reels, and Shorts</p>
+    </div>
+  </div>
+</div>
+
+## Quick Links
+
+import { Cards, Card } from 'nextra/components'
+
+<Cards>
+  <Card title="Installation" href="/getting-started/installation" />
+  <Card title="Quick Start" href="/getting-started/quick-start" />
+  <Card title="API Reference" href="/api-reference/endpoints" />
+  <Card title="Deployment" href="/deployment/docker" />
+</Cards>
+
+## Features Overview
+
+| Feature | Description |
+|---------|-------------|
+| AI Clipping | Automatically identifies viral moments |
+| Face Tracking | Smooth, dynamic face following |
+| Split-Screen | Screen + webcam layout for tutorials |
+| Podcast Mode | 2-person vertical stacking |
+| Caption Styles | 5+ presets including viral gold, neon pop |
+
+## Architecture
+
+```
+┌─────────────────┐      ┌─────────────────┐
+│    Frontend     │──────│     Backend     │
+│    (Next.js)    │      │    (FastAPI)    │
+└─────────────────┘      └─────────────────┘
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         │                      │                      │
+         ▼                      ▼                      ▼
+   ┌───────────┐        ┌───────────┐         ┌───────────┐
+   │ Gemini AI │        │  Whisper  │         │  FFmpeg   │
+   │ (Planning)│        │ (Transcr) │         │ (Render)  │
+   └───────────┘        └───────────┘         └───────────┘
+```
+
+## License
+
+Epiclips is open-source software licensed under the [MIT License](https://github.com/akshaynstack/epiclips/blob/main/LICENSE).

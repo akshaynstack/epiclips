@@ -47,6 +47,7 @@ class LayoutType:
     # Internal layout types detected by SmartLayoutDetector:
     SPLIT_SCREEN = "split_screen"    # Screen content on top, face on bottom (detected automatically)
     TALKING_HEAD = "talking_head"    # Face-focused single crop (detected automatically)
+    PODCAST = "podcast"              # Side-by-side 2-up for multi-speaker (podcasts, interviews)
 
 
 def get_layout_preset(layout_id: str) -> dict:
@@ -90,6 +91,16 @@ def get_layout_preset(layout_id: str) -> dict:
             "face_ratio": 1.0,
             "requires_face": True,
             "requires_screen": False,
+        },
+        LayoutType.PODCAST: {
+            "id": LayoutType.PODCAST,
+            "name": "Podcast (2-Up)",
+            "description": "Side-by-side layout for 2 speakers - podcasts, interviews, reactions",
+            "screen_ratio": 0.0,
+            "face_ratio": 1.0,
+            "requires_face": True,
+            "requires_screen": False,
+            "multi_speaker": True,
         },
     }
 
@@ -136,6 +147,7 @@ class CaptionPreset:
     NEON_POP = "neon_pop"
     BOLD_BOXED = "bold_boxed"
     GRADIENT_GLOW = "gradient_glow"
+    OPUS_BOLD = "opus_bold"  # OpusClip-inspired with green highlighting
 
 
 def get_caption_preset(preset_id: str) -> CaptionStyle:
@@ -157,6 +169,7 @@ def get_caption_preset(preset_id: str) -> CaptionStyle:
         CaptionPreset.NEON_POP: _create_neon_pop_style(),
         CaptionPreset.BOLD_BOXED: _create_bold_boxed_style(),
         CaptionPreset.GRADIENT_GLOW: _create_gradient_glow_style(),
+        CaptionPreset.OPUS_BOLD: _create_opus_bold_style(),
     }
 
     if preset_id not in presets:
@@ -203,6 +216,12 @@ def get_available_presets() -> list[dict]:
             "name": "Gradient Glow",
             "description": "Modern white with coral pink accents - trendy lifestyle content",
             "preview_colors": {"primary": "#FFFFFF", "highlight": "#FF6B6B"},
+        },
+        {
+            "id": CaptionPreset.OPUS_BOLD,
+            "name": "Opus Bold",
+            "description": "OpusClip-inspired chunky bold with bright green highlights",
+            "preview_colors": {"primary": "#FFFFFF", "highlight": "#00FF00"},
         },
     ]
 
@@ -302,6 +321,27 @@ def _create_gradient_glow_style() -> CaptionStyle:
     return style
 
 
+def _create_opus_bold_style() -> CaptionStyle:
+    """Opus Bold: OpusClip-inspired chunky bold with bright green highlights."""
+    style = CaptionStyle()
+    style.font_name = "Impact"  # Chunky bold font
+    style.font_size = 75
+    style.primary_color = "#FFFFFF"
+    style.highlight_color = "#00FF00"  # Bright green
+    style.outline_color = "#000000"
+    style.outline_width = 5  # Thick outline for bold look
+    style.shadow_color = "#000000"
+    style.position = "bottom"  # Default to bottom for talking head; center for split-screen is set dynamically
+    style.max_words_per_line = 3
+    style.word_by_word_highlight = True
+    style.alignment = "center"
+    style.bold = True
+    style.uppercase = True
+    return style
+
+
+
+
 class Settings(BaseSettings):
     """
     Application settings.
@@ -315,7 +355,7 @@ class Settings(BaseSettings):
     # ============================================================
 
     # Application
-    app_name: str = "viewcreator-genesis"
+    app_name: str = "epirium-genesis"
     debug: bool = False
     log_level: str = "INFO"
 
@@ -323,11 +363,12 @@ class Settings(BaseSettings):
     aws_region: str = "us-east-1"
     aws_access_key_id: Optional[str] = None
     aws_secret_access_key: Optional[str] = None
-    s3_bucket: str = "viewcreator-media"
+    s3_bucket: str = "epirium-media"
 
     # API Keys (required)
     groq_api_key: Optional[str] = None
     openrouter_api_key: Optional[str] = None
+    openrouter_model: str = "google/gemini-flash-1.5-8b"  # Model for clip planning via OpenRouter
 
     # Security - API authentication
     genesis_api_key: Optional[str] = None  # API key for authenticating incoming requests
@@ -336,13 +377,9 @@ class Settings(BaseSettings):
     # yt-dlp Configuration
     ytdlp_proxy: Optional[str] = None  # Proxy URL (e.g., http://user:pass@host:port)
 
-    # Performance tuning (configurable for ECS scaling)
+    # Performance tuning
     max_workers: int = 4  # Max concurrent jobs (set to vCPU count for optimal performance)
-    max_render_workers: int = 2  # Max concurrent FFmpeg render processes (reduced for 8GB Fargate)
-
-    # Fargate optimization mode (for 4 vCPU / 8 GB RAM containers)
-    # When True, applies memory-conservative settings to prevent OOM on long videos
-    fargate_mode: bool = True  # Enable for Fargate/ECS deployment
+    max_render_workers: int = 2  # Max concurrent FFmpeg render processes
 
     # ============================================================
     # HARDCODED SETTINGS (not configurable via env vars)
@@ -359,10 +396,7 @@ class Settings(BaseSettings):
 
     @property
     def max_concurrent_renders(self) -> int:
-        # Fargate mode: sequential renders to avoid 100% CPU spikes
-        # Normal mode: use configured value (default 2)
-        if self.fargate_mode:
-            return 1
+        """Max concurrent FFmpeg render processes."""
         return self.max_render_workers
 
     @property
@@ -422,9 +456,28 @@ class Settings(BaseSettings):
     def openrouter_base_url(self) -> str:
         return "https://openrouter.ai/api/v1"
 
+    # openrouter_model is now a configurable env var, see Settings class above
+    
     @property
-    def gemini_model(self) -> str:
-        return "google/gemini-2.5-flash"
+    def use_vlm_layout_detection(self) -> bool:
+        """
+        Use VLM (Vision Language Model) for layout detection.
+        
+        When False (default), uses CPU-based heuristics for layout detection.
+        This is faster and has zero API costs but may be slightly less accurate.
+        """
+        return False
+    
+    @property
+    def output_directory(self) -> str:
+        """
+        Local directory for storing output clips and artifacts.
+        
+        Clips are organized as: output/{job_id}/clip_XX.mp4
+        """
+        import os
+        # Use 'output' folder in project root (ai-clipping/)
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")
 
     # Clip Planning Configuration
     @property
@@ -479,8 +532,8 @@ class Settings(BaseSettings):
 
     @property
     def max_frames_per_vision_batch(self) -> int:
-        # Reduce batch size on Fargate to limit memory usage (~32 frames = ~600MB base64)
-        return 32 if self.fargate_mode else 48
+        """Max frames per batch for vision model API calls."""
+        return 48
 
     # Face tracking FPS (frames per second for face tracking)
     # Higher = more precise tracking, but more CPU usage
@@ -492,11 +545,10 @@ class Settings(BaseSettings):
         return 10.0
 
     # Detection workers (parallel clip detection)
-    # Lower = smoother CPU, but slower total time
     @property
     def detection_workers(self) -> int:
-        # 2 workers in Fargate mode (vs 4) - prevents CPU spike from 4 parallel MediaPipe
-        return 2 if self.fargate_mode else 4
+        """Number of parallel detection workers."""
+        return 4
 
     # Pose estimation toggle - disabled by default for AI clipping (not used)
     @property

@@ -1,1267 +1,343 @@
-# ViewCreator Genesis
+﻿<div align="center">
 
-Genesis is ViewCreator's media processing engine - a production-ready FastAPI microservice that transforms long-form YouTube videos into viral-optimized short-form clips using AI-powered analysis, intelligent cropping, and automated caption generation.
+# 🎬 Epiclips
 
-## Table of Contents
+**Open-source AI-powered video clipping tool**
 
-- [Overview](#overview)
-- [System Architecture](#system-architecture)
-- [Pipeline Stages](#pipeline-stages)
-- [Service Components](#service-components)
-- [API Reference](#api-reference)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Integration](#integration)
-  - [NestJS API Integration](#nestjs-api-integration)
-  - [Webhook Integration](#webhook-integration)
-  - [Frontend Integration](#frontend-integration)
-- [Development](#development)
+Transform long-form videos into viral short-form clips with AI-driven analysis, intelligent face tracking, and automated captions.
+
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
+[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://docker.com)
+
+[Documentation](https://github.com/akshaynstack/epiclips/tree/main/docs) • [Demo](#demo) • [Quick Start](#quick-start) • [API Reference](#api-reference)
+
+</div>
 
 ---
 
-## Overview
+## ✨ Features
 
-ViewCreator Genesis is the media processing engine that handles the computationally intensive work of:
-
-1. **Downloading** videos from YouTube or S3
-2. **Transcribing** audio with word-level timestamps using Whisper
-3. **Analyzing** content with AI to identify viral-worthy segments
-4. **Detecting** faces and poses for intelligent cropping
-5. **Rendering** 9:16 portrait clips with dynamic face tracking and captions
-6. **Uploading** finished clips to S3 with metadata
-
-### Key Features
-
-| Feature | Technology | Speed/Performance |
-|---------|------------|-------------------|
-| Video Download | yt-dlp | Up to 50 MB/s |
-| Transcription | Groq Whisper | 216x realtime |
-| AI Planning | Gemini 2.5 Flash | ~2s per analysis |
-| Face Detection | Multi-tier (MediaPipe + Haar) | 60+ FPS with fallbacks |
-| Pose Estimation | MediaPipe | 30+ FPS |
-| Object Tracking | DeepSORT | Persistent IDs |
-| Video Rendering | FFmpeg H.264 (parallel) | 3 concurrent renders |
-| Caption Style | ASS Subtitles (overlay) | Word-by-word highlight |
-| Parallel Processing | asyncio.gather | Detection, rendering, uploads |
+| Feature | Description |
+|---------|-------------|
+| 🤖 **AI-Powered Clipping** | Uses Gemini AI to identify the most viral-worthy segments |
+| 👤 **Smart Face Tracking** | Multi-tier face detection (MediaPipe + Haar) with smooth tracking |
+| 📱 **9:16 Portrait Output** | Perfect for TikTok, Reels, and YouTube Shorts |
+| 💬 **Auto Captions** | Word-by-word highlighting with customizable styles |
+| 🎨 **Caption Presets** | 5+ built-in styles including viral gold, neon pop, opus bold |
+| 🖥️ **Split-Screen Layout** | Auto-detects screen share + webcam for split rendering |
+| 🎙️ **Podcast Mode** | 2-person podcast detection with top/bottom stacking |
+| ⚡ **Fast Transcription** | Groq Whisper at 216x realtime speed |
+| 🌐 **Modern Frontend** | Next.js 14 with real-time progress updates |
 
 ---
 
-## System Architecture
+## 🎥 Demo
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                      ViewCreator AI Clipping Architecture                        │
-└─────────────────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Creator UI      │────▶│  NestJS API      │────▶│     Genesis      │
-│  (Next.js)       │     │  (viewcreator-   │     │    (FastAPI)     │
-│                  │◀────│   api)           │◀────│                  │
-└──────────────────┘     └──────────────────┘     └──────────────────┘
-                                │      ▲                   │
-                                │      │ webhooks          │
-                                │      │ (real-time)       │
-                                ▼      │                   ▼
-                         ┌──────────────┐          ┌──────────────┐
-                         │   Postgres   │          │     AWS      │
-                         │   (Jobs DB)  │          │  S3 Bucket   │
-                         └──────────────┘          └──────────────┘
-
-Worker Internal Architecture:
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                           AI Clipping Pipeline                                   │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐       │
-│  │   Video     │    │   Audio     │    │ Intelligence│    │  Detection  │       │
-│  │  Downloader │───▶│ Transcriber │───▶│   Planner   │───▶│  Pipeline   │       │
-│  │  (yt-dlp)   │    │  (Whisper)  │    │  (Gemini)   │    │ (MediaPipe) │       │
-│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘       │
-│                                                                   │              │
-│                                                                   ▼              │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐       │
-│  │   S3       │◀───│   Rendering  │◀───│   Content   │◀───│   Object    │       │
-│  │  Upload    │    │   Service    │    │   Region    │    │   Tracker   │       │
-│  │  Service   │    │  (FFmpeg)    │    │   Detector  │    │  (DeepSORT) │       │
-│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘       │
-│                                                                                  │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+<div align="center">
+  <img src="docs/assets/demo.gif" alt="Epiclips Demo" width="600">
+</div>
 
 ---
 
-## Pipeline Stages
+## 🚀 Quick Start
 
-### Stage 1: Video Download (`VideoDownloaderService`)
+### Prerequisites
 
-Downloads the source video using yt-dlp with automatic format selection.
+- Python 3.11+
+- Node.js 18+
+- FFmpeg
+- Docker (optional)
 
-```
-Input:  YouTube URL, S3 URL, or direct video URL
-Output: Local video file + VideoMetadata
-```
+### Option 1: Docker (Recommended)
 
-**Capabilities:**
-- YouTube videos (any length up to 2 hours)
-- S3 bucket URLs (s3:// or https://)
-- Direct HTTP/HTTPS video URLs
-- Automatic best quality selection (720p-1080p preferred)
-- Metadata extraction (title, duration, dimensions)
-
-**Code Flow:**
-```python
-# video_downloader.py
-async def download(video_url: str, work_dir: str) -> DownloadResult:
-    source_type = self._detect_source_type(video_url)  # youtube, s3, direct
-    
-    if source_type == "youtube":
-        return await self._download_youtube(video_url, work_dir)
-    elif source_type == "s3":
-        return await self._download_s3(video_url, work_dir)
-    else:
-        return await self._download_direct(video_url, work_dir)
-```
-
----
-
-### Stage 2: Audio Transcription (`TranscriptionService`)
-
-Extracts audio and transcribes using Groq's Whisper API (216x realtime speed).
-
-```
-Input:  Video file path
-Output: TranscriptionResult (segments with word-level timestamps)
-```
-
-**Data Structures:**
-```python
-@dataclass
-class TranscriptWord:
-    word: str
-    start_time_ms: int
-    end_time_ms: int
-
-@dataclass
-class TranscriptSegment:
-    start_time_ms: int
-    end_time_ms: int
-    text: str
-    words: list[TranscriptWord]  # Word-level timing for captions
-
-@dataclass
-class TranscriptionResult:
-    segments: list[TranscriptSegment]
-    full_text: str
-    language: Optional[str]
-    duration_seconds: float
-```
-
-**Process:**
-1. Extract audio from video using FFmpeg → MP3
-2. Send to Groq Whisper API with `timestamp_granularities=["word", "segment"]`
-3. Parse response into structured segments with word timings
-4. Return for use in planning and caption generation
-
----
-
-### Stage 3: Intelligence Planning (`IntelligencePlannerService`)
-
-Uses Gemini via OpenRouter to analyze the transcript and identify viral-worthy segments.
-
-```
-Input:  TranscriptionResult + optional vision frames
-Output: ClipPlanResponse (list of segments with virality scores)
-```
-
-**AI Prompt Strategy:**
-```
-You are AI-Clipping-Agent, a virality analyst that identifies the most engaging 
-segments from long-form videos for short-form content.
-
-Your task:
-1. Analyze the provided transcript to understand the content
-2. Identify moments with high viral potential:
-   - Strong hooks (first 3 seconds are critical)
-   - Emotional peaks
-   - Surprising reveals
-   - Compelling storytelling moments
-3. Assign layout types:
-   - "talking_head": Speaker facing camera, focus on face
-   - "screen_share": Screen content with webcam overlay
-
-Return exactly {clip_count} clips as JSON with:
-- start_time, end_time (in seconds)
-- virality_score (0.0 to 1.0)
-- layout_type ("talking_head" or "screen_share")
-- summary (why this clip is viral-worthy)
-- tags (content categories)
-```
-
-**Duration Range Support:**
-Users can select preferred clip durations:
-- `short`: 15-30 seconds
-- `medium`: 30-60 seconds  
-- `long`: 60-120 seconds
-
-The AI respects these preferences when selecting clip boundaries.
-
----
-
-### Stage 4: Detection Pipeline (`DetectionPipeline`)
-
-Runs computer vision analysis on the planned clip segments.
-
-```
-Input:  Video path + clip segments
-Output: Detection frames with face/pose data per timestamp
-```
-
-**Components:**
-
-| Component | Model | Purpose |
-|-----------|-------|---------|
-| `FaceDetector` | Multi-tier fallback | Bounding boxes + confidence |
-| `PoseEstimator` | MediaPipe | 33 body keypoints |
-| `ObjectTracker` | DeepSORT | Persistent track IDs |
-| `FrameExtractor` | FFmpeg | Extract frames at intervals |
-
-**Face Detection Multi-Tier Fallback:**
-The face detector uses 3 backends in priority order for robust detection:
-
-| Tier | Model | Best For |
-|------|-------|----------|
-| 1 | MediaPipe FaceDetection (short-range) | Close-up faces, primary detector |
-| 2 | MediaPipe FaceDetection (full-range) | Small/distant faces (webcam overlays) |
-| 3 | Haar Cascade | Final fallback for edge cases |
-
-- **MIN_FACE_AREA_RATIO**: 0.1% (allows ~45x45 face in 1080p)
-- **Confidence threshold**: 0.5 (primary), 0.3 (full-range fallback)
-
-**Detection Flow:**
-```python
-async def process_local_video(
-    video_path: str,
-    start_time_ms: int,
-    end_time_ms: int,
-    frame_interval_seconds: float = 0.5,  # 2 FPS for detection
-) -> dict:
-    frames = extract_frames(video_path, start_time_ms, end_time_ms)
-    
-    for frame in frames:
-        faces = face_detector.detect(frame)
-        poses = pose_estimator.estimate(frame)
-        
-        # Track objects across frames for consistent IDs
-        tracked_faces = tracker.update_faces(faces, frame)
-        tracked_poses = tracker.update_poses(poses, frame)
-        
-        frame_detections.append({
-            "timestamp_sec": timestamp,
-            "faces": tracked_faces,
-            "poses": tracked_poses,
-        })
-    
-    return {"frames": frame_detections}
-```
-
----
-
-### Stage 5: Content Region Detection (`ContentRegionDetector`)
-
-Intelligently analyzes frames to detect screen content vs webcam overlays.
-
-```
-Input:  Detection frames + face data
-Output: FrameAnalysis (webcam position, screen content center, layout type)
-```
-
-**Detection Logic:**
-```python
-def analyze_frame(frame, face_detections) -> FrameAnalysis:
-    # 1. Find primary face (largest/most confident)
-    primary_face_center = find_best_face(face_detections)
-    
-    # 2. Detect webcam overlay (small face in corner)
-    webcam_region = detect_webcam_overlay(face_detections)
-    
-    # 3. Calculate screen content center (avoiding webcam)
-    screen_content_center = calculate_screen_center(webcam_region)
-    
-    # 4. Determine layout type
-    is_screen_share = determine_layout_type(face_detections, webcam_region)
-    
-    return FrameAnalysis(
-        primary_face_center=primary_face_center,
-        webcam_region=webcam_region,
-        screen_content_center=screen_content_center,
-        is_screen_share_layout=is_screen_share,
-    )
-```
-
-**Webcam Detection Heuristics:**
-- Face in corner region (< 35% from edge)
-- Face size < 15% of frame area
-- Different texture than surrounding content
-
----
-
-### Stage 6: Crop Timeline Building
-
-Builds dynamic crop trajectories from detection data.
-
-```
-Input:  Detection frames + segment metadata
-Output: CropTimeline (keyframes with center positions)
-```
-
-**Crop Modes:**
-
-#### Talking Head Mode (Single Region)
-```
-┌────────────────────────────────┐
-│     Original 16:9 Frame        │
-│  ┌──────────────────────────┐  │
-│  │   Source Video           │  │
-│  │      ┌─────────┐         │  │
-│  │      │  Face   │◀────────│──│── Dynamic tracking
-│  │      └─────────┘         │  │
-│  │                          │  │
-│  └──────────────────────────┘  │
-└────────────────────────────────┘
-              │
-              ▼
-        ┌───────────┐
-        │   9:16    │
-        │  Output   │
-        │  ┌─────┐  │
-        │  │Face │  │  ◀── Face centered in upper 35%
-        │  └─────┘  │
-        │           │
-        │           │
-        └───────────┘
-```
-
-#### Screen Share Mode (Split Layout - Screen Top, Face Bottom)
-```
-┌────────────────────────────────┐
-│     Original 16:9 Frame        │
-│  ┌──────────────────────────┐  │
-│  │   Screen Content         │──│── Square center crop
-│  │                          │  │
-│  │               ┌───┐      │  │
-│  │               │Web│◀─────│──│── Face detected for bottom region
-│  │               │cam│      │  │
-│  └──────────────────────────┘  │
-└────────────────────────────────┘
-              │
-              ▼
-        ┌───────────┐
-        │   9:16    │
-        │  ┌─────┐  │  ◀── Top 50%: Screen (square center crop)
-        │  │Screen│ │
-        │  ├─────┤  │  ◀── Captions OVERLAY (no black band)
-        │  │CAPS │  │
-        │  ├─────┤  │
-        │  │ Face │ │  ◀── Bottom 50%: Tight face crop (scaled UP)
-        │  └─────┘  │
-        └───────────┘
-```
-
-**Split Layout Features:**
-- **2-Region Layout**: Screen (50%) + Face (50%), no separate caption band
-- **Captions Overlay**: ASS subtitles render directly on video content
-- **Tight Face Crop**: 2x detected face size, capped at 1/3 of source
-- **Dramatic Scale-Up**: Small crop scales 3x+ to create close-up effect
-- **Video Dimension Verification**: Uses ffprobe to verify dimensions before cropping
-
-**Smoothing Algorithm:**
-```python
-def build_crop_timeline(detection_frames, segment) -> CropTimeline:
-    # 3-frame moving average for smooth camera movement
-    smoothed_centers = apply_moving_average(detection_frames, window_size=3)
-    
-    keyframes = []
-    for i, frame_data in enumerate(detection_frames):
-        center_x, center_y = smoothed_centers[i]
-        
-        # For talking_head: frame face in upper 35% of output
-        if segment.layout_type == "talking_head":
-            center_y = adjust_for_face_framing(center_y, target_ratio=0.35)
-        
-        keyframes.append(CropKeyframe(
-            timestamp_ms=frame_data["timestamp_ms"],
-            center_x=center_x,
-            center_y=center_y,
-        ))
-    
-    return CropTimeline(keyframes=keyframes, ...)
-```
-
----
-
-### Stage 7: Caption Generation (`CaptionGeneratorService`)
-
-Generates viral-style ASS subtitles with word-by-word highlighting.
-
-```
-Input:  TranscriptSegments + clip timing + style config (or preset)
-Output: .ass subtitle file
-```
-
-**Caption Presets:**
-
-Users can select from 5 pre-configured caption styles:
-
-| Preset | Primary Color | Highlight Color | Description |
-|--------|---------------|-----------------|-------------|
-| `viral_gold` | White | Gold (#FFD700) | Classic viral caption style |
-| `clean_white` | White | Blue (#3B82F6) | Clean, professional look |
-| `neon_pop` | Cyan (#00FFFF) | Magenta (#FF00FF) | Bold, eye-catching neon |
-| `bold_boxed` | White | Red (#EF4444) | High contrast red emphasis |
-| `gradient_glow` | White | Green (#22C55E) | Fresh green highlight |
-
-**Caption Preset Configuration:**
-```python
-# config.py - get_caption_preset() returns CaptionStyle for preset ID
-
-# Example preset configuration
-CaptionPreset.VIRAL_GOLD → CaptionStyle(
-    primary_color="#FFFFFF",
-    highlight_color="#FFD700",
-    font_name="Arial Black",
-    font_size=72,
-    bold=True,
-    uppercase=True,
-    ...
-)
-```
-
-**Caption Style System:**
-```python
-@dataclass
-class CaptionStyle:
-    font_name: str = "Arial Black"
-    font_size: int = 72
-    primary_color: str = "#FFFFFF"      # White base text
-    highlight_color: str = "#FFD700"    # Gold highlight
-    outline_color: str = "#000000"      # Black outline
-    outline_width: int = 4
-    position: str = "center"            # top/center/bottom
-    max_words_per_line: int = 4
-    word_by_word_highlight: bool = True
-    bold: bool = True
-    uppercase: bool = True
-```
-
-**Word-by-Word Highlighting:**
-
-Each word is highlighted sequentially as it's spoken. Events are timed so each word's display ends exactly when the next word begins, ensuring seamless transitions with no overlapping lines.
-
-```
-Time: 0.0s  → "THIS is how you"        (THIS highlighted)
-Time: 0.3s  → "This IS how you"        (IS highlighted)
-Time: 0.5s  → "This is HOW you"        (HOW highlighted)
-Time: 0.7s  → "This is how YOU"        (YOU highlighted)
-```
-
-**Implementation Note:** Word timestamps from transcription services can overlap. The caption generator ensures each word's event ends when the next word starts to prevent double-line display issues.
-
----
-
-### Stage 8: Video Rendering (`RenderingService`)
-
-Renders final clips using FFmpeg with dynamic cropping and caption burning.
-
-```
-Input:  RenderRequest (video, timelines, captions)
-Output: RenderResult (MP4 file path + metadata)
-```
-
-**Render Modes:**
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `focus_mode` | Single dynamic crop following face | Talking head content |
-| `split_mode` | 2-region split (50% screen + 50% face) with captions overlay | Screen share with speaker (default) |
-| `stack_mode` | Legacy split screen (55% screen + 45% face) | Fallback mode |
-| `static_mode` | Center crop, no motion | Fallback when no faces |
-
-**FFmpeg Command Structure (Focus Mode):**
 ```bash
-ffmpeg -i input.mp4 \
-  -ss 134.2 -t 63.2 \                           # Clip timing
-  -vf "
-    crop=w:h:x:y,                                # Dynamic crop expression
-    scale=1080:1920:force_original_aspect_ratio=decrease,
-    pad=1080:1920:(ow-iw)/2:(oh-ih)/2,
-    ass=captions.ass                             # Burn captions
-  " \
-  -c:v libx264 -preset veryfast -crf 20 \       # H.264 encoding
-  -c:a aac -b:a 128k \                          # AAC audio
-  output.mp4
+# Clone the repository
+git clone https://github.com/akshaynstack/epiclips.git
+cd epiclips
+
+# Copy environment file
+cp .env.example .env
+
+# Edit .env with your API keys (see Configuration section)
+
+# Run with Docker Compose
+docker-compose up -d
 ```
 
-**Dynamic Crop Expression:**
-```python
-def build_crop_expression(timeline: CropTimeline, clip_start_ms: int) -> str:
-    # Interpolate X position between keyframes
-    x_expr = build_interpolation_expr(timeline.keyframes, "x", clip_start_ms)
-    y_expr = build_interpolation_expr(timeline.keyframes, "y", clip_start_ms)
-    
-    return f"crop={timeline.window_width}:{timeline.window_height}:{x_expr}:{y_expr}"
+The API will be available at `http://localhost:8000` and frontend at `http://localhost:3000`.
+
+### Option 2: Manual Setup (using uv - Recommended)
+
+[uv](https://github.com/astral-sh/uv) is a lightning-fast Python package manager that ensures environment isolation.
+
+```bash
+# Clone and enter directory
+git clone https://github.com/akshaynstack/epiclips.git
+cd epiclips
+
+# Initialize and install dependencies (Python 3.11 required)
+# uv will automatically create a .venv on its first run
+uv sync --python 3.11
+
+# Copy and configure environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# Run the server
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+### Option 3: Legacy Manual Setup (venv)
+
+> [!WARNING]
+> Python 3.12+ is NOT compatible with MediaPipe 0.10.9. You MUST use Python 3.11.
+
+```bash
+# Create virtual environment (Python 3.11)
+python3.11 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the server
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+#### Frontend (Next.js)
+
+```bash
+# In a new terminal
+cd frontend
+
+# Install dependencies
+npm install
+
+# Run development server
+npm run dev
+```
+
+Visit `http://localhost:3000` to access the app.
 
 ---
 
-### Stage 9: S3 Upload (`S3UploadService`)
+## ⚙️ Configuration
 
-Uploads rendered clips and metadata to AWS S3.
+Create a `.env` file with the following variables:
 
-```
-Input:  Clip files + job metadata
-Output: JobOutput (S3 URLs for all artifacts)
+```env
+# Required - AI Services
+OPENROUTER_API_KEY=your_openrouter_api_key    # For AI clip planning
+OPENROUTER_MODEL=google/gemini-flash-1.5-8b   # Model to use (free options available)
+GROQ_API_KEY=your_groq_api_key                # For fast transcription
+
+# Optional - Cloud Storage
+AWS_ACCESS_KEY_ID=your_aws_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret
+AWS_S3_BUCKET=your-bucket-name
+AWS_REGION=us-east-1
+
+# Optional - Webhooks
+WEBHOOK_URL=https://your-api.com/webhook    # Receive job completion events
+WEBHOOK_SECRET=your_webhook_secret
 ```
 
-**S3 Key Structure:**
-```
-viewcreator-media/
-├── clips/
-│   └── {user_id}/
-│       └── {job_id}/
-│           ├── clip_0.mp4
-│           ├── clip_1.mp4
-│           ├── transcript.json
-│           └── plan.json
-```
+### Getting API Keys
 
-**Upload Process:**
-```python
-async def upload_job_artifacts(
-    job_id: str,
-    owner_user_id: str,
-    clip_artifacts: list[ClipArtifact],
-    transcript_json: dict,
-    plan_json: dict,
-) -> JobOutput:
-    # Upload clips with proper content-type
-    for clip in clip_artifacts:
-        s3_url = await upload_file(
-            file_path=clip.file_path,
-            s3_key=f"clips/{owner_user_id}/{job_id}/clip_{clip.index}.mp4",
-            content_type="video/mp4",
-        )
-        clip.s3_url = s3_url
-    
-    # Upload metadata
-    transcript_url = await upload_json(transcript_json, f"...transcript.json")
-    plan_url = await upload_json(plan_json, f"...plan.json")
-    
-    return JobOutput(clips=clip_artifacts, transcript_url=transcript_url, ...)
-```
+| Service | Purpose | Get Key |
+|---------|---------|---------|
+| **OpenRouter** | AI clip planning | [OpenRouter](https://openrouter.ai/keys) |
+| **Groq** | Fast transcription | [Groq Console](https://console.groq.com/keys) |
 
 ---
 
-## Service Components
+## 📡 API Reference
 
-### Directory Structure
+### Submit a Clipping Job
 
-```
-viewcreator-genesis/
-├── app/
-│   ├── main.py                    # FastAPI application entry
-│   ├── config.py                  # Pydantic Settings configuration
-│   ├── routers/
-│   │   ├── ai_clipping.py         # /ai-clipping endpoints
-│   │   ├── detection.py           # /detect endpoints
-│   │   └── health.py              # /health endpoints
-│   ├── services/
-│   │   ├── ai_clipping_pipeline.py    # Main orchestrator
-│   │   ├── video_downloader.py        # yt-dlp integration
-│   │   ├── transcription_service.py   # Groq Whisper
-│   │   ├── intelligence_planner.py    # Gemini planning
-│   │   ├── detection_pipeline.py      # Detection orchestrator
-│   │   ├── face_detector.py           # MediaPipe + Haar faces
-│   │   ├── pose_estimator.py          # MediaPipe poses
-│   │   ├── tracker.py                 # DeepSORT tracking
-│   │   ├── frame_extractor.py         # FFmpeg frame extraction
-│   │   ├── content_region_detector.py # Screen/webcam detection
-│   │   ├── caption_generator.py       # ASS subtitle generation
-│   │   ├── rendering_service.py       # FFmpeg rendering
-│   │   ├── s3_upload_service.py       # S3 upload handling
-│   │   ├── s3_client.py               # Low-level S3 operations
-│   │   └── webhook_service.py         # Webhook delivery to API
-│   └── schemas/
-│       ├── requests.py                # Pydantic request models
-│       └── responses.py               # Pydantic response models
-├── models/                        # Pre-downloaded ML models (Haar cascades)
-├── tests/
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
-```
-
-### Service Dependency Graph
-
-```
-                    ┌─────────────────────┐
-                    │ AIClippingPipeline  │  ◀── Main Orchestrator
-                    └─────────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-        ▼                     ▼                     ▼
-┌───────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│VideoDownloader│   │TranscriptionSvc │   │IntelligencePlnr│
-└───────────────┘   └─────────────────┘   └─────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │DetectionPipeline│
-                    └─────────────────┘
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-        ▼                     ▼                     ▼
-┌───────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│ FaceDetector  │   │ PoseEstimator   │   │  ObjectTracker  │
-└───────────────┘   └─────────────────┘   └─────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │ContentRegionDet │
-                    └─────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │RenderingService │───▶ CaptionGenerator
-                    └─────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │ S3UploadService │
-                    └─────────────────┘
-```
-
----
-
-## API Reference
-
-### Health Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Basic liveness check |
-| `/health/ready` | GET | Readiness (models loaded) |
-| `/health/models` | GET | Detailed model status |
-
-### AI Clipping Endpoints
-
-#### Get Caption Presets
-
-```http
-GET /ai-clipping/caption-presets
-```
-
-**Response:**
-```json
-[
-  {
-    "id": "viral_gold",
-    "name": "Viral Gold",
-    "description": "Classic viral caption style with gold highlight",
-    "preview_colors": {
-      "primary": "#FFFFFF",
-      "highlight": "#FFD700"
-    }
-  },
-  {
-    "id": "clean_white",
-    "name": "Clean White",
-    "description": "Clean, professional look with blue accent",
-    "preview_colors": {
-      "primary": "#FFFFFF",
-      "highlight": "#3B82F6"
-    }
-  }
-  // ... more presets
-]
-```
-
-#### Submit Job
-
-```http
-POST /ai-clipping/jobs
-Content-Type: application/json
-
-{
-  "video_url": "https://www.youtube.com/watch?v=VIDEO_ID",
-  "max_clips": 5,
-  "duration_ranges": ["short", "medium"],
-  "target_platform": "tiktok",
-  "include_captions": true,
-  "caption_preset": "viral_gold",
-  "caption_style": {
-    "font_family": "Arial Black",
-    "font_size": 72,
-    "primary_color": "FFFFFF",
-    "highlight_color": "FFD700",
-    "position": "center"
-  },
-  "external_job_id": "uuid-from-api",
-  "owner_user_id": "user-123"
-}
-```
-
-**Note:** `caption_preset` takes precedence over `caption_style` if both are provided. Use presets for consistent styling or custom `caption_style` for full control.
+```bash
+curl -X POST http://localhost:8000/ai-clipping/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "video_url": "https://www.youtube.com/watch?v=VIDEO_ID",
+    "max_clips": 5,
+    "duration_ranges": ["short", "medium"],
+    "include_captions": true,
+    "caption_preset": "viral_gold"
+  }'
 ```
 
 **Response:**
 ```json
 {
-  "job_id": "e2ee893e-0bcd-47cb-9173-578388a96a78",
+  "job_id": "abc123-...",
   "status": "accepted",
-  "message": "Job queued for processing",
   "estimated_processing_minutes": 8
 }
 ```
 
-#### Get Job Status
-
-```http
-GET /ai-clipping/jobs/{job_id}
-```
-
-**Response (Processing):**
-```json
-{
-  "job_id": "e2ee893e-...",
-  "status": "rendering",
-  "progress_percent": 75,
-  "current_stage": "rendering",
-  "current_message": "Rendering clip 2 of 5"
-}
-```
-
-**Response (Completed):**
-```json
-{
-  "job_id": "e2ee893e-...",
-  "status": "completed",
-  "progress_percent": 100,
-  "output": {
-    "job_id": "e2ee893e-...",
-    "source_video_title": "Video Title Here",
-    "total_clips": 5,
-    "clips": [
-      {
-        "clip_index": 0,
-        "s3_url": "https://cdn.viewcreator.ai/clips/user-123/e2ee893e/clip_0.mp4",
-        "duration_ms": 45000,
-        "start_time_ms": 134200,
-        "end_time_ms": 179200,
-        "virality_score": 0.92,
-        "layout_type": "screen_share",
-        "summary": "Key insight about Claude Opus 4.5 pricing...",
-        "tags": ["AI", "Claude", "Pricing"]
-      }
-    ],
-    "transcript_url": "https://cdn.viewcreator.ai/clips/.../transcript.json",
-    "plan_url": "https://cdn.viewcreator.ai/clips/.../plan.json",
-    "processing_time_seconds": 182.5
-  }
-}
-```
-
-#### List Jobs
-
-```http
-GET /ai-clipping/jobs?status=completed&limit=10
-```
-
-#### Cancel Job
-
-```http
-DELETE /ai-clipping/jobs/{job_id}
-```
-
-### Detection Endpoints
-
-```http
-POST /detect
-Content-Type: application/json
-
-{
-  "job_id": "uuid",
-  "video_s3_key": "users/user123/videos/source.mp4",
-  "frame_interval_seconds": 2.0,
-  "detect_faces": true,
-  "detect_poses": true
-}
-```
-
----
-
-## Configuration
-
-### Environment Variables
-
-The application uses a minimal set of environment variables. All processing settings (rendering, detection, captions, etc.) are hardcoded in the application for consistency.
-
-**Note:** For details on configuring proxies to bypass YouTube blocking, see [YouTube Proxy Configuration](docs/YOUTUBE_PROXY_CONFIGURATION.md).
-
-```env
-# ═══════════════════════════════════════════════════════════════
-# APPLICATION
-# ═══════════════════════════════════════════════════════════════
-APP_NAME=viewcreator-genesis
-DEBUG=false
-LOG_LEVEL=INFO
-
-# ═══════════════════════════════════════════════════════════════
-# AWS S3
-# ═══════════════════════════════════════════════════════════════
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-access-key          # Optional in ECS (use IAM roles)
-AWS_SECRET_ACCESS_KEY=your-secret-key      # Optional in ECS (use IAM roles)
-S3_BUCKET=viewcreator-media
-
-# ═══════════════════════════════════════════════════════════════
-# API KEYS (Required)
-# ═══════════════════════════════════════════════════════════════
-GROQ_API_KEY=gsk_...                       # Groq Whisper transcription
-OPENROUTER_API_KEY=sk-or-...               # OpenRouter → Gemini planning
-```
-
-### Full Configuration Reference
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `APP_NAME` | `viewcreator-genesis` | Application name |
-| `DEBUG` | `false` | Enable debug logging |
-| `LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR) |
-| `AWS_REGION` | `us-east-1` | AWS region for S3 |
-| `AWS_ACCESS_KEY_ID` | - | AWS access key (optional with IAM roles) |
-| `AWS_SECRET_ACCESS_KEY` | - | AWS secret key (optional with IAM roles) |
-| `S3_BUCKET` | `viewcreator-media` | S3 bucket for video storage |
-| `GROQ_API_KEY` | - | **Required** Groq API key for transcription |
-| `OPENROUTER_API_KEY` | - | **Required** OpenRouter API key for AI planning |
-
-### Hardcoded Settings
-
-All other settings are hardcoded in `app/config.py` for consistency:
-
-| Setting | Value | Description |
-|---------|-------|-------------|
-| Output Resolution | 1080x1920 | 9:16 portrait video |
-| FFmpeg Preset | veryfast | Encoding speed |
-| FFmpeg CRF | 20 | Quality level |
-| Split Layout | 50% / 50% | Screen (top) / Face (bottom) |
-| Transcription Model | whisper-large-v3-turbo | Groq Whisper model |
-| Gemini Model | google/gemini-2.5-flash | AI planning model |
-| Face Detection | Multi-tier fallback | MediaPipe + Haar Cascade |
-| Caption Style | Arial Black, 72px, Gold highlight | Word-by-word highlighting |
-| Parallel Rendering | asyncio.gather | Max 3 concurrent FFmpeg processes |
-| Parallel S3 Uploads | asyncio.gather | Concurrent clip uploads |
-
----
-
-## Deployment
-
-### Docker Compose (Development)
-
-```yaml
-# docker-compose.yml
-version: '3.8'
-
-services:
-  genesis:
-    build: .
-    container_name: viewcreator-genesis
-    ports:
-      - "8000:8000"
-    environment:
-      # Application
-      - DEBUG=false
-      - LOG_LEVEL=INFO
-      # AWS S3
-      - AWS_REGION=us-east-1
-      - S3_BUCKET=viewcreator-media-dev
-      # API Keys (required)
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-    volumes:
-      - /tmp/genesis:/tmp/genesis
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-```
+### Check Job Status
 
 ```bash
-# Build and run
-docker-compose up --build
-
-# View logs
-docker logs viewcreator-genesis -f
-
-# Rebuild after code changes
-docker-compose up -d --build
-```
-
-### AWS ECS (Production)
-
-```json
-{
-  "family": "genesis",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "4096",
-  "memory": "8192",
-  "executionRoleArn": "arn:aws:iam::...:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::...:role/genesis-task-role",
-  "containerDefinitions": [
-    {
-      "name": "genesis",
-      "image": "your-ecr-repo/genesis:latest",
-      "portMappings": [
-        { "containerPort": 8000, "protocol": "tcp" }
-      ],
-      "secrets": [
-        {
-          "name": "GROQ_API_KEY",
-          "valueFrom": "arn:aws:secretsmanager:...:secret:groq-api-key"
-        },
-        {
-          "name": "OPENROUTER_API_KEY",
-          "valueFrom": "arn:aws:secretsmanager:...:secret:openrouter-api-key"
-        }
-      ],
-      "environment": [
-        { "name": "AWS_REGION", "value": "us-east-1" },
-        { "name": "S3_BUCKET", "value": "viewcreator-media" },
-        { "name": "LOG_LEVEL", "value": "INFO" }
-      ],
-      "healthCheck": {
-        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
-        "interval": 30,
-        "timeout": 10,
-        "retries": 3,
-        "startPeriod": 120
-      },
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/genesis",
-          "awslogs-region": "us-east-1",
-          "awslogs-stream-prefix": "ecs"
-        }
-      }
-    }
-  ]
-}
-```
-
-**IAM Task Role Permissions:**
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject"
-      ],
-      "Resource": "arn:aws:s3:::viewcreator-media/*"
-    }
-  ]
-}
-```
-
----
-
-## Integration
-
-### NestJS API Integration
-
-The `viewcreator-api` orchestrates jobs and transforms URLs:
-
-```typescript
-// viewcreator-api/src/modules/ai-clipping-agent/services/clipping-worker-client.service.ts
-
-@Injectable()
-export class ClippingWorkerClientService {
-  constructor(
-    private readonly httpService: HttpService,
-    private readonly configService: ConfigService,
-  ) {}
-
-  async submitJob(request: ClippingJobSubmitRequest): Promise<{ jobId: string }> {
-    const workerUrl = this.configService.get('CLIPPING_WORKER_URL');
-    
-    const response = await this.httpService.post(
-      `${workerUrl}/ai-clipping/jobs`,
-      {
-        video_url: request.video_url,
-        max_clips: request.max_clips,
-        duration_ranges: request.clip_duration_ranges,
-        target_platform: request.target_platform,
-        include_captions: request.include_captions,
-        caption_style: request.caption_style,
-        external_job_id: request.external_job_id,
-        owner_user_id: request.owner_user_id,
-      },
-    ).toPromise();
-    
-    return { jobId: response.data.job_id };
-  }
-
-  async pollJobCompletion(jobId: string): Promise<ClippingJobResult> {
-    const workerUrl = this.configService.get('CLIPPING_WORKER_URL');
-    const response = await this.httpService.get(
-      `${workerUrl}/ai-clipping/jobs/${jobId}`,
-    ).toPromise();
-    
-    // Transform S3 URLs to CDN URLs
-    if (response.data.output?.clips) {
-      response.data.output.clips = response.data.output.clips.map(clip => ({
-        ...clip,
-        s3_url: this.transformToCdnUrl(clip.s3_url),
-      }));
-    }
-    
-    return response.data;
-  }
-
-  private transformToCdnUrl(s3Url: string): string {
-    // Transform s3://bucket/key to https://cdn.viewcreator.ai/key
-    const cdnDomain = this.configService.get('MEDIA_CDN_DOMAIN');
-    return s3Url.replace(/^https:\/\/[^\/]+\//, `https://${cdnDomain}/`);
-  }
-}
-```
-
-### Webhook Integration
-
-Genesis sends real-time job status updates to the NestJS API via webhooks, eliminating the need for constant polling.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         WEBHOOK FLOW                                             │
-└─────────────────────────────────────────────────────────────────────────────────┘
-
-viewcreator-api                                          genesis
-      │                                                        │
-      │  POST /ai-clipping/jobs                                │
-      │  { callback_url: "https://api.../webhooks/ai-clipping" │
-      │───────────────────────────────────────────────────────▶│
-      │◀─────────────────────────────────────────────────────── │ 202 {job_id}
-      │                                                        │
-      │  POST /webhooks/ai-clipping (job.started)              │
-      │◀───────────────────────────────────────────────────────│
-      │                                                        │
-      │  POST /webhooks/ai-clipping (job.progress: 25%)        │
-      │◀───────────────────────────────────────────────────────│
-      │                                                        │
-      │  POST /webhooks/ai-clipping (job.completed)            │
-      │◀───────────────────────────────────────────────────────│ {clips: [...]}
-```
-
-**Webhook Events:**
-
-| Event | When Sent | Payload |
-|-------|-----------|---------|
-| `job.started` | Processing begins | `{status, progress: 0}` |
-| `job.progress` | Each pipeline stage | `{status, progress, current_step}` |
-| `job.completed` | Job succeeds | `{status: succeeded, output: {clips}}` |
-| `job.failed` | Job fails | `{status: failed, error}` |
-
-**Webhook Payload Structure:**
-
-```json
-{
-  "event": "job.progress",
-  "timestamp": "2024-11-28T10:32:00.000Z",
-  "job_id": "genesis-internal-id",
-  "external_job_id": "api-job-uuid",
-  "owner_user_id": "user-123",
-  "status": "running",
-  "progress_percent": 65,
-  "current_step": "Rendering clip 3/5...",
-  "clips_completed": 2,
-  "total_clips": 5
-}
-```
-
-**Webhook Service Features:**
-
-- **Automatic retries**: 3 retries with exponential backoff (1s, 2s, 4s)
-- **Throttling**: Progress webhooks limited to every 2 seconds
-- **Fire-and-forget**: Progress updates don't block pipeline
-- **Guaranteed delivery**: Terminal events (completed/failed) are awaited
-
-**Configuration:**
-
-The API passes `callback_url` when submitting jobs:
-
-```python
-# Genesis receives callback_url in job request
-{
-  "video_url": "https://youtube.com/...",
-  "callback_url": "https://api.viewcreator.ai/webhooks/ai-clipping",
-  "external_job_id": "550e8400-e29b-41d4-a716-446655440000",
-  "owner_user_id": "user-123"
-}
-```
-
-The API requires these environment variables for webhooks:
-
-```env
-# viewcreator-api .env
-API_BASE_URL=https://api.viewcreator.ai   # Used to build callback URL
-WEBHOOK_SECRET=your-secret-key            # Optional: for signature verification
-```
-
-See [WEBHOOKS_IMPLEMENTATION.md](./WEBHOOKS_IMPLEMENTATION.md) for full implementation details.
-
-### Frontend Integration
-
-```typescript
-// viewcreator-creator-ui/src/app/(dashboard)/ai-clipping-agent/page.tsx
-
-const [durationRanges, setDurationRanges] = useState<string[]>(['medium']);
-
-const handleSubmit = async () => {
-  const response = await fetch('/api/ai-clipping-agent/jobs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      youtubeUrl: videoUrl,
-      requestedClipCount: clipCount,
-      clipDurationRanges: durationRanges,
-      targetPlatform: 'tiktok',
-      includeCaptions: true,
-    }),
-  });
-  
-  const { jobId } = await response.json();
-  // Poll for completion...
-};
-
-// Duration range selector UI
-<div className="flex gap-2">
-  {['short', 'medium', 'long'].map(range => (
-    <Button
-      key={range}
-      variant={durationRanges.includes(range) ? 'default' : 'outline'}
-      onClick={() => toggleDurationRange(range)}
-    >
-      {range === 'short' ? '15-30s' : range === 'medium' ? '30-60s' : '1-2min'}
-    </Button>
-  ))}
-</div>
-```
-
----
-
-## Development
-
-### Local Setup
-
-```bash
-# 1. Clone and setup
-cd viewcreator-genesis
-python -m venv venv
-source venv/bin/activate
-
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Install system dependencies
-# macOS:
-brew install ffmpeg
-
-# 4. Download yt-dlp
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-chmod +x /usr/local/bin/yt-dlp
-
-# 5. Set environment variables
-export GROQ_API_KEY=gsk_...
-export OPENROUTER_API_KEY=sk-or-...
-
-# 6. Run server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-### Testing
-
-```bash
-# Submit a test job
-curl -X POST http://localhost:8000/ai-clipping/jobs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "max_clips": 1,
-    "duration_ranges": ["short"],
-    "include_captions": true
-  }'
-
-# Check job status
 curl http://localhost:8000/ai-clipping/jobs/{job_id}
-
-# View API docs
-open http://localhost:8000/docs
 ```
 
-### Debugging
+### Available Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/ai-clipping/jobs` | POST | Submit new clipping job |
+| `/ai-clipping/jobs/{id}` | GET | Get job status and results |
+| `/ai-clipping/caption-presets` | GET | List available caption styles |
+| `/health` | GET | Health check |
+| `/health/ready` | GET | Readiness check |
+
+### Caption Presets
+
+| Preset ID | Style | Colors |
+|-----------|-------|--------|
+| `viral_gold` | Classic viral | White + Gold |
+| `clean_white` | Professional | White + Blue |
+| `neon_pop` | Bold neon | Cyan + Magenta |
+| `bold_boxed` | High contrast | White + Red |
+| `opus_bold` | OpusClip-style | White + Green |
+
+---
+
+## 🏗️ Project Structure
+
+```
+epiclips/
+├── app/                    # FastAPI backend
+│   ├── main.py            # Application entry
+│   ├── config.py          # Configuration
+│   ├── routers/           # API endpoints
+│   └── services/          # Core services
+│       ├── ai_clipping_pipeline.py
+│       ├── face_detector.py
+│       ├── rendering_service.py
+│       ├── caption_generator.py
+│       └── ...
+├── frontend/              # Next.js frontend
+│   ├── app/              # App router pages
+│   ├── lib/              # Utilities & store
+│   └── public/           # Static assets
+├── docs/                  # Documentation
+├── examples/              # Example scripts
+├── tests/                 # Test suite
+├── Dockerfile
+├── docker-compose.yml
+└── requirements.txt
+```
+
+---
+
+## 🎨 Rendering Modes
+
+### Talking Head Mode
+Full-frame face tracking with the subject centered in the upper third.
+
+```
+┌─────────────────┐
+│   ┌─────────┐   │
+│   │  Face   │   │  ← Dynamic tracking
+│   └─────────┘   │
+│                 │
+│                 │
+│   [Captions]    │
+└─────────────────┘
+```
+
+### Split-Screen Mode
+Screen content on top, speaker on bottom - perfect for tutorials.
+
+```
+┌─────────────────┐
+│   ┌─────────┐   │
+│   │ Screen  │   │  ← 50%
+│   └─────────┘   │
+│   [Captions]    │
+│   ┌─────────┐   │
+│   │  Face   │   │  ← 50%
+│   └─────────┘   │
+└─────────────────┘
+```
+
+### Podcast Mode
+Two speakers stacked vertically for interviews and podcasts.
+
+```
+┌─────────────────┐
+│   ┌─────────┐   │
+│   │Speaker 1│   │  ← 50%
+│   └─────────┘   │
+│   ┌─────────┐   │
+│   │Speaker 2│   │  ← 50%
+│   └─────────┘   │
+│   [Captions]    │
+└─────────────────┘
+```
+
+---
+
+## 🛠️ Development
+
+### Running Tests
 
 ```bash
-# View Docker logs
-docker logs viewcreator-genesis -f --tail=100
+# Run all tests
+pytest tests/
 
-# Check specific stage
-docker logs viewcreator-genesis 2>&1 | grep "Transcription"
-docker logs viewcreator-genesis 2>&1 | grep "Detection"
-docker logs viewcreator-genesis 2>&1 | grep "Rendering"
-
-# Rebuild after changes
-docker-compose up -d --build
+# Run with coverage
+pytest tests/ --cov=app
 ```
 
-### Common Issues
+### Code Style
 
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| `GROQ_API_KEY not set` | Missing env var | Export GROQ_API_KEY |
-| `OPENROUTER_API_KEY not set` | Missing env var | Export OPENROUTER_API_KEY |
-| `yt-dlp not found` | Missing binary | Install yt-dlp |
-| `FFmpeg not found` | Missing binary | Install ffmpeg |
-| `S3 upload failed` | Missing credentials | Set AWS credentials or IAM role |
-| `Detection returning 0 faces` | Face too small | Multi-tier fallback handles this (MediaPipe full-range detects small webcam faces) |
-| `Black screen in output` | S3 URL not transformed | Check CDN URL transformation |
-| `Crop too big error` | Video dimension mismatch | Service auto-corrects via ffprobe dimension verification |
-| `Face not filling bottom` | Crop size issue | Crop capped at 1/3 of source for 3x+ scale-up |
-| `Double caption lines` | Overlapping word timestamps | Fixed: word events end when next word starts (see caption_generator.py) |
+```bash
+# Format code
+black app/
+isort app/
+
+# Type checking
+mypy app/
+```
 
 ---
 
-## Performance Benchmarks
+## 🤝 Contributing
 
-| Stage | Time (30 min video) | Notes |
-|-------|---------------------|-------|
-| Download | 15-30s | Depends on network |
-| Transcription | ~8s | 216x realtime (Groq) |
-| Planning | 2-3s | Gemini Flash |
-| Detection | 30-45s | 2 FPS sampling |
-| Rendering | 10-15s per clip | FFmpeg veryfast |
-| Upload | 5-10s per clip | S3 PUT |
-| **Total** | **2-4 min** | For 5 clips |
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ---
 
-## License
+## 📄 License
 
-Proprietary - ViewCreator © 2025
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 🙏 Acknowledgments
+
+- [MediaPipe](https://mediapipe.dev/) - Face detection
+- [FFmpeg](https://ffmpeg.org/) - Video processing
+- [Groq](https://groq.com/) - Fast transcription
+- [Google Gemini](https://deepmind.google/technologies/gemini/) - AI planning
+
+---
+
+<div align="center">
+
+**Made with ❤️ by [Akshay](https://github.com/akshaynstack)**
+
+⭐ Star this repo if you find it useful!
+
+</div>

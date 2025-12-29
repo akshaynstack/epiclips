@@ -85,6 +85,9 @@ class LayoutAnalysis:
     speaker_analysis: Optional[any] = None  # SpeakerAnalysis from speaker_tracker
     active_speaker_count: int = 0  # Number of active (non-background) speakers
     layout_driven_by_speakers: bool = False  # True if layout was determined by speaker analysis
+    
+    # For podcast layout: list of 2 face bboxes for side-by-side rendering
+    podcast_face_bboxes: Optional[list[tuple[int, int, int, int]]] = None
 
     @property
     def segment_count(self) -> int:
@@ -1045,8 +1048,8 @@ class SmartLayoutDetector:
                 y_variance = max(y_positions) - min(y_positions)
                 
                 # Webcam overlays move very little (maybe a few pixels due to detection jitter)
-                # A real person moving around will have high variance (100+ pixels)
-                MAX_POSITION_VARIANCE = 80  # pixels - allow some detection jitter
+                # A real person moving around will have high variance (400+ pixels)
+                MAX_POSITION_VARIANCE = 350  # pixels - increased to allow for webcam jitter and head movement
                 
                 if x_variance > MAX_POSITION_VARIANCE or y_variance > MAX_POSITION_VARIANCE:
                     logger.info(
@@ -1166,6 +1169,76 @@ class SmartLayoutDetector:
             confidence=0.9,
             corner_facecam_bbox=final_bbox,
         ))
+        
+        # MERGE SHORT SEGMENTS: Eliminate jarring transitions from detection gaps
+        # Short segments (< 3 seconds) are usually detection failures, not real layout changes
+        MIN_SEGMENT_DURATION_MS = 3000  # 3 seconds
+        
+        if len(segments) > 1:
+            # Calculate total duration by layout type
+            screen_share_duration = sum(
+                seg.end_ms - seg.start_ms 
+                for seg in segments 
+                if seg.layout_type == "screen_share"
+            )
+            total_duration = end_ms - start_ms
+            dominant_layout = "screen_share" if screen_share_duration > total_duration / 2 else "talking_head"
+            
+            # Get global average bbox from all screen_share segments
+            all_bboxes = [seg.corner_facecam_bbox for seg in segments if seg.corner_facecam_bbox]
+            global_avg_bbox = None
+            if all_bboxes:
+                avg_x = int(sum(b[0] for b in all_bboxes) / len(all_bboxes))
+                avg_y = int(sum(b[1] for b in all_bboxes) / len(all_bboxes))
+                avg_w = int(sum(b[2] for b in all_bboxes) / len(all_bboxes))
+                avg_h = int(sum(b[3] for b in all_bboxes) / len(all_bboxes))
+                global_avg_bbox = (avg_x, avg_y, avg_w, avg_h)
+            
+            # Merge short segments that differ from dominant layout
+            merged_segments = []
+            for seg in segments:
+                seg_duration = seg.end_ms - seg.start_ms
+                
+                # If segment is short and differs from dominant, merge into neighbors
+                if seg_duration < MIN_SEGMENT_DURATION_MS and seg.layout_type != dominant_layout:
+                    if merged_segments:
+                        # Extend previous segment
+                        merged_segments[-1] = LayoutSegment(
+                            start_ms=merged_segments[-1].start_ms,
+                            end_ms=seg.end_ms,
+                            layout_type=merged_segments[-1].layout_type,
+                            confidence=merged_segments[-1].confidence,
+                            corner_facecam_bbox=merged_segments[-1].corner_facecam_bbox or global_avg_bbox,
+                        )
+                    else:
+                        # First segment is short - convert to dominant layout
+                        merged_seg = LayoutSegment(
+                            start_ms=seg.start_ms,
+                            end_ms=seg.end_ms,
+                            layout_type=dominant_layout,
+                            confidence=seg.confidence,
+                            corner_facecam_bbox=global_avg_bbox if dominant_layout == "screen_share" else None,
+                        )
+                        merged_segments.append(merged_seg)
+                else:
+                    # Merge with previous if same layout type
+                    if merged_segments and merged_segments[-1].layout_type == seg.layout_type:
+                        merged_segments[-1] = LayoutSegment(
+                            start_ms=merged_segments[-1].start_ms,
+                            end_ms=seg.end_ms,
+                            layout_type=seg.layout_type,
+                            confidence=max(merged_segments[-1].confidence, seg.confidence),
+                            corner_facecam_bbox=merged_segments[-1].corner_facecam_bbox or seg.corner_facecam_bbox,
+                        )
+                    else:
+                        merged_segments.append(seg)
+            
+            if len(merged_segments) < len(segments):
+                logger.info(
+                    f"Merged {len(segments)} raw segments into {len(merged_segments)} "
+                    f"(eliminated {len(segments) - len(merged_segments)} short segments < {MIN_SEGMENT_DURATION_MS}ms)"
+                )
+                segments = merged_segments
         
         # Log segment creation
         for seg in segments:

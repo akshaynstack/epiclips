@@ -62,6 +62,7 @@ class CaptionGeneratorService:
         clip_end_ms: int,
         output_path: str,
         caption_style: Optional[CaptionStyle] = None,
+        layout_type: Optional[str] = None,
     ) -> Optional[str]:
         """
         Generate ASS captions for a clip.
@@ -72,11 +73,25 @@ class CaptionGeneratorService:
             clip_end_ms: Clip end time in milliseconds
             output_path: Path to save the .ass file
             caption_style: Optional custom caption styling
+            layout_type: Optional layout type to dynamically adjust position
+                         - "screen_share" or "split_screen" → center position
+                         - "talking_head" or None → use style's default position
             
         Returns:
             Path to generated .ass file, or None if no captions generated
         """
         style = caption_style or self.settings.get_caption_style()
+        
+        # DYNAMIC POSITION OVERRIDE based on layout type
+        # Split-screen/screen-share needs captions in the center (between the two halves)
+        # Talking head keeps captions at the bottom
+        if layout_type in ("screen_share", "split_screen"):
+            style.position = "center"
+            logger.info(f"Caption position set to 'center' for layout: {layout_type}")
+        elif layout_type == "talking_head":
+            style.position = "bottom"
+            logger.info(f"Caption position set to 'bottom' for layout: {layout_type}")
+
         
         # Filter segments that overlap with this clip
         relevant_segments = [
@@ -206,15 +221,17 @@ class CaptionGeneratorService:
         alignment = ALIGNMENT_MAP[style.alignment][style.position]
         bold = -1 if style.bold else 0
         
-        # Calculate vertical margin based on position (for 1080x1920)
+        # Calculate vertical margin based on position (for 1080x1920 output)
+        # For "center" position, use small margin so captions appear at true center
+        # This works well for split-screen where the split point is at 960px (50%)
         margin_v = {
             "top": 100,
-            "center": 450,
+            "center": 50,  # Small margin for true center - appears at split point
             "bottom": 100,
         }[style.position]
         
         return f"""[Script Info]
-Title: ViewCreator Viral Captions
+Title: Epirium Viral Captions
 ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
@@ -228,6 +245,7 @@ Style: Default,{style.font_name},{style.font_size},{primary_color},{highlight_co
 Style: Highlight,{style.font_name},{style.font_size},{highlight_color},{primary_color},{outline_color},{shadow_color},{bold},0,0,0,100,100,0,0,1,{style.outline_width},2,{alignment},50,50,{margin_v},1
 
 """
+
 
     def _generate_events_header(self) -> str:
         """Generate ASS events section header."""

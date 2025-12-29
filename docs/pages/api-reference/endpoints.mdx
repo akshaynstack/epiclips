@@ -1,0 +1,185 @@
+# API Endpoints
+
+Complete reference for all Epiclips API endpoints.
+
+## Base URL
+
+```
+http://localhost:8000
+```
+
+## Health Endpoints
+
+### GET /health
+
+Basic liveness check.
+
+```bash
+curl http://localhost:8000/health
+```
+
+```json
+{
+  "status": "healthy"
+}
+```
+
+### GET /health/ready
+
+Readiness check (all services loaded).
+
+### GET /health/models
+
+Detailed model status.
+
+```json
+{
+  "face_detector": {
+    "ready": true,
+    "backends": ["mediapipe_shortrange", "mediapipe_fullrange", "haar_cascade"]
+  }
+}
+```
+
+---
+
+## AI Clipping Endpoints
+
+### POST /ai-clipping/jobs
+
+Submit a new clipping job.
+
+**Request Body:**
+
+```json
+{
+  "video_url": "https://www.youtube.com/watch?v=VIDEO_ID",
+  "max_clips": 5,
+  "duration_ranges": ["short", "medium"],
+  "include_captions": true,
+  "caption_preset": "viral_gold",
+  "external_job_id": "optional-uuid",
+  "owner_user_id": "optional-user-id"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `video_url` | string | ✅ | YouTube URL or direct video URL |
+| `max_clips` | integer | ❌ | Number of clips to generate (1-10, default: 5) |
+| `duration_ranges` | string[] | ❌ | Preferred durations: short, medium, long |
+| `include_captions` | boolean | ❌ | Add captions (default: true) |
+| `caption_preset` | string | ❌ | Caption style preset ID |
+
+**Response:**
+
+```json
+{
+  "job_id": "abc123-def456-...",
+  "status": "accepted",
+  "message": "Job queued for processing",
+  "estimated_processing_minutes": 5
+}
+```
+
+---
+
+### GET /ai-clipping/jobs/{job_id}
+
+Get job status and results.
+
+**Response (Processing):**
+
+```json
+{
+  "job_id": "abc123-...",
+  "status": "rendering",
+  "progress_percent": 75,
+  "current_stage": "rendering",
+  "current_message": "Rendering clip 3 of 5"
+}
+```
+
+**Response (Completed):**
+
+```json
+{
+  "job_id": "abc123-...",
+  "status": "completed",
+  "progress_percent": 100,
+  "output": {
+    "job_id": "abc123-...",
+    "source_video_title": "Video Title",
+    "total_clips": 5,
+    "clips": [
+      {
+        "clip_index": 0,
+        "s3_url": "https://...",
+        "duration_ms": 45000,
+        "start_time_ms": 134200,
+        "end_time_ms": 179200,
+        "virality_score": 0.92,
+        "layout_type": "talking_head",
+        "summary": "Key moment about...",
+        "tags": ["AI", "Technology"]
+      }
+    ],
+    "processing_time_seconds": 182.5
+  }
+}
+```
+
+**Status Values:**
+
+| Status | Description |
+|--------|-------------|
+| `accepted` | Job queued |
+| `downloading` | Fetching video |
+| `transcribing` | Extracting transcript |
+| `planning` | AI selecting clips |
+| `detecting` | Analyzing faces |
+| `rendering` | Creating clips |
+| `uploading` | Uploading to storage |
+| `completed` | Finished successfully |
+| `failed` | Job failed |
+
+---
+
+### GET /ai-clipping/jobs
+
+List all jobs.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status |
+| `limit` | integer | Max results (default: 50) |
+
+---
+
+### DELETE /ai-clipping/jobs/{job_id}
+
+Cancel a running job.
+
+---
+
+### GET /ai-clipping/caption-presets
+
+List available caption style presets.
+
+**Response:**
+
+```json
+[
+  {
+    "id": "viral_gold",
+    "name": "Viral Gold",
+    "description": "Classic viral caption style with gold highlight",
+    "preview_colors": {
+      "primary": "#FFFFFF",
+      "highlight": "#FFD700"
+    }
+  }
+]
+```

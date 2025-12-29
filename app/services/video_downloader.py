@@ -269,9 +269,81 @@ class VideoDownloaderService:
         if source_type == "s3":
             return await self._download_from_s3(url, output_path, s3_bucket)
         elif source_type == "youtube":
+            # Check cache first for YouTube videos
+            cached_result = await self._check_video_cache(url, output_path)
+            if cached_result:
+                return cached_result
             return await self._download_from_youtube(url, output_path, output_dir, max_duration_seconds)
         else:
             return await self._download_direct_url(url, output_path)
+
+    def _get_video_id(self, url: str) -> Optional[str]:
+        """Extract YouTube video ID from URL."""
+        import re
+        patterns = [
+            r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
+            r'youtube\.com/embed/([a-zA-Z0-9_-]{11})',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
+    async def _check_video_cache(self, url: str, output_path: str) -> Optional[DownloadResult]:
+        """
+        Check if video is already cached and copy to output path if so.
+        
+        Cache location: video_cache/{video_id}.mp4
+        """
+        import shutil
+        
+        video_id = self._get_video_id(url)
+        if not video_id:
+            return None
+        
+        # Cache directory in project root
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "video_cache")
+        cached_path = os.path.join(cache_dir, f"{video_id}.mp4")
+        
+        if os.path.isfile(cached_path):
+            logger.info(f"🎬 Video found in cache: {cached_path}")
+            
+            # Copy cached video to output path
+            shutil.copy2(cached_path, output_path)
+            file_size = os.path.getsize(output_path)
+            
+            # Get metadata from cached file
+            metadata = await self._get_video_metadata_ffprobe(output_path)
+            metadata.source_type = "youtube"
+            
+            logger.info(f"✅ Using cached video: {file_size / 1024 / 1024:.1f} MB, {metadata.width}x{metadata.height}")
+            
+            return DownloadResult(
+                video_path=output_path,
+                metadata=metadata,
+                file_size_bytes=file_size,
+                source_type="youtube",
+            )
+        
+        return None
+
+    async def _cache_video(self, video_path: str, url: str):
+        """Save downloaded video to cache for future use."""
+        import shutil
+        
+        video_id = self._get_video_id(url)
+        if not video_id:
+            return
+        
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "video_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        cached_path = os.path.join(cache_dir, f"{video_id}.mp4")
+        
+        if not os.path.isfile(cached_path):
+            shutil.copy2(video_path, cached_path)
+            logger.info(f"📦 Video cached for future use: {cached_path}")
+
 
     async def _download_from_youtube(
         self,
@@ -410,6 +482,9 @@ class VideoDownloaderService:
         actual_metadata.source_type = "youtube"
 
         logger.info(f"Actual video dimensions: {actual_metadata.width}x{actual_metadata.height} @ {actual_metadata.fps}fps")
+
+        # Cache the video for future use
+        await self._cache_video(output_path, url)
 
         return DownloadResult(
             video_path=output_path,

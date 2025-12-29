@@ -1,68 +1,32 @@
+# Epiclips - Docker Compose
+# Run with: docker-compose up -d
+
 services:
-  genesis:
+  # ===========================================
+  # Backend - FastAPI AI Clipping Service
+  # ===========================================
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: viewcreator-genesis
+    container_name: epiclips-backend
     ports:
       - "8000:8000"
     env_file:
-      - .env  # Load from .env file
+      - .env
     environment:
-      # AWS Configuration (use your credentials)
-      - AWS_REGION=${AWS_REGION:-us-east-1}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
-      - S3_BUCKET=${S3_BUCKET:-viewcreator-media}
-      
-      # Parallel Processing Settings
+      # Performance
       - MAX_WORKERS=${MAX_WORKERS:-4}
-      - MAX_RENDER_WORKERS=${MAX_RENDER_WORKERS:-3}
-      
-      # Processing Settings
-      - FRAME_INTERVAL_SECONDS=2.0
-      - MAX_CONCURRENT_JOBS=2
-      - TEMP_DIRECTORY=/tmp/genesis
-      
-      # Detection Thresholds
-      - FACE_CONFIDENCE_THRESHOLD=0.5
-      - POSE_CONFIDENCE_THRESHOLD=0.5
-      - TRACKING_MAX_AGE=30
-      
-      # AI Services Configuration
-      # Transcription (Groq Whisper)
-      - GROQ_API_KEY=${GROQ_API_KEY:-}
-      
-      # Intelligence Planning (Gemini via OpenRouter)
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - INTELLIGENCE_MODEL=${INTELLIGENCE_MODEL:-google/gemini-2.0-flash-001}
-
-      # yt-dlp Configuration
-      - YTDLP_PROXY=${YTDLP_PROXY:-}
-
-      # Security - API Authentication (must match viewcreator-api configuration)
-      - GENESIS_API_KEY=${GENESIS_API_KEY:-}
-      - GENESIS_WEBHOOK_SECRET=${GENESIS_WEBHOOK_SECRET:-}
-
-      # Rendering Configuration
-      - TARGET_OUTPUT_WIDTH=1080
-      - TARGET_OUTPUT_HEIGHT=1920
-      - FFMPEG_PRESET=medium
-      - FFMPEG_CRF=23
+      - MAX_RENDER_WORKERS=${MAX_RENDER_WORKERS:-2}
+      - TEMP_DIRECTORY=/tmp/epiclips
       
       # Logging
       - LOG_LEVEL=INFO
-      - DEBUG=false
     
     volumes:
-      # Persistent temp storage (optional)
-      - genesis-temp:/tmp/genesis
-      # NOTE: For local development with hot-reload, uncomment the line below
-      # after adding this path to Docker Desktop's File Sharing settings
-      # - ./app:/app/app:ro
+      - epiclips-temp:/tmp/epiclips
+      - ./output:/app/output
     
-    # Resource limits (adjust based on your needs)
-    # Note: AI clipping requires more resources than detection alone
     deploy:
       resources:
         limits:
@@ -81,26 +45,25 @@ services:
     
     restart: unless-stopped
 
-  # Optional: LocalStack for S3 emulation in development
-  localstack:
-    image: localstack/localstack:latest
-    container_name: viewcreator-localstack
+  # ===========================================
+  # Frontend - Next.js Web Interface
+  # ===========================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: epiclips-frontend
     ports:
-      - "4566:4566"
+      - "3000:3000"
     environment:
-      - SERVICES=s3
-      - DEBUG=0
-      - DATA_DIR=/var/lib/localstack/data
-    volumes:
-      - localstack-data:/var/lib/localstack
-    profiles:
-      - localstack  # Only start with: docker-compose --profile localstack up
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
 
 volumes:
-  genesis-temp:
-  localstack-data:
+  epiclips-temp:
 
 networks:
   default:
-    name: viewcreator-network
-
+    name: epiclips-network

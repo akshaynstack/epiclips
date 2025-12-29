@@ -63,14 +63,18 @@ class VLMLayoutResult:
 
 class VLMLayoutDetector:
     """
-    Detects video layout using Vision Language Models.
+    Detects video layout using Vision Language Models or CPU-based heuristics.
     
-    Uses Gemini Flash vision for fast, accurate layout analysis.
-    Falls back to pure heuristics if VLM is unavailable.
+    By default uses CPU-based heuristics (OpenCV edge detection + face detection)
+    for fast, zero-cost layout detection. Can optionally use VLM (Gemini Flash
+    via OpenRouter) for higher accuracy at additional API cost.
     
-    API: Uses OpenRouter to call Gemini Flash (NOT running locally)
-    Cost: ~$0.0001 per image (very cheap)
-    Speed: ~1-2 seconds per image
+    API mode: Uses OpenRouter to call Gemini Flash (NOT running locally)
+    CPU mode: Uses OpenCV edge analysis + MediaPipe face detection
+    
+    Control via config: settings.use_vlm_layout_detection
+    - False (default): CPU-based heuristics, zero API cost
+    - True: VLM-based detection, ~$0.0001 per image
     """
     
     def __init__(self):
@@ -120,7 +124,10 @@ class VLMLayoutDetector:
         frame_height: int = 1080,
     ) -> VLMLayoutResult:
         """
-        Analyze a single frame to detect layout type using VLM.
+        Analyze a single frame to detect layout type.
+        
+        Uses CPU-based heuristics by default (fast, zero cost).
+        Can use VLM if enabled in config.
         
         Args:
             frame: Video frame as numpy array (BGR format)
@@ -130,14 +137,22 @@ class VLMLayoutDetector:
         Returns:
             VLMLayoutResult with layout detection results
         """
+        settings = get_settings()
+        
+        # Check if VLM detection is enabled
+        if not settings.use_vlm_layout_detection:
+            # Use CPU-based heuristics (default - fast and free)
+            return self._fallback_detection(frame, frame_width, frame_height)
+        
+        # VLM mode - requires API key
         if not self.openrouter_api_key:
-            logger.warning("OPENROUTER_API_KEY not set, using fallback detection")
+            logger.warning("OPENROUTER_API_KEY not set, using CPU fallback detection")
             return self._fallback_detection(frame, frame_width, frame_height)
         
         try:
             return await self._analyze_with_gemini_flash(frame, frame_width, frame_height)
         except Exception as e:
-            logger.warning(f"VLM analysis failed: {e}, using fallback")
+            logger.warning(f"VLM analysis failed: {e}, using CPU fallback")
             return self._fallback_detection(frame, frame_width, frame_height)
     
     async def _analyze_with_gemini_flash(
@@ -187,7 +202,7 @@ Respond with ONLY this JSON:
             headers={
                 "Authorization": f"Bearer {self.openrouter_api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://viewcreator.ai",  # Required by OpenRouter
+                "HTTP-Referer": "https://epirium.ai",  # Required by OpenRouter
             },
             json={
                 "model": "google/gemini-2.0-flash-001",  # Fast, cheap, excellent vision
@@ -418,10 +433,8 @@ Respond with ONLY this JSON:
                 # VLM calls are network-bound; sampling at 1 FPS causes dozens of API calls per clip.
                 # For typical "talking_head" vs "screen_share" detection + webcam position, a small,
                 # evenly-spaced sample set is sufficient and dramatically faster.
-                #
-                # Fargate mode defaults to a smaller cap to keep latency predictable.
-                max_samples = 5 if settings.fargate_mode else 12
-                target_interval_sec = 10.0 if settings.fargate_mode else 5.0
+                max_samples = 12
+                target_interval_sec = 5.0
 
                 estimated = int(duration_sec / target_interval_sec) + 2  # include start/end
                 sample_count = max(3, min(estimated, max_samples))
@@ -534,11 +547,10 @@ Respond with ONLY this JSON:
                     reasoning="No frames could be analyzed",
                 )
 
-            settings = get_settings()
-            target_precision_ms = 250 if settings.fargate_mode else 200
-            max_windows_to_refine = 2 if settings.fargate_mode else 4
+            target_precision_ms = 200
+            max_windows_to_refine = 4
             max_heuristic_steps = 10
-            max_extra_vlm_frames = 6 if settings.fargate_mode else 12
+            max_extra_vlm_frames = 12
             extra_vlm_frames_added = 0
 
             # ------------------------------------------------------------
@@ -685,8 +697,8 @@ Respond with ONLY this JSON:
                 webcam_bbox = self._estimate_webcam_bbox(webcam_position, frame_width, frame_height)
             else:
                 # No webcam in any frame - check majority
-                screen_share_votes = sum(1 for r in vlm_results if r.layout_type == "screen_share")
-                dominant_layout = "screen_share" if screen_share_votes > len(vlm_results) / 2 else "talking_head"
+                screen_share_votes = sum(1 for r in sorted_results if r.layout_type == "screen_share")
+                dominant_layout = "screen_share" if screen_share_votes > len(sorted_results) / 2 else "talking_head"
                 webcam_bbox = None
             
             logger.info(

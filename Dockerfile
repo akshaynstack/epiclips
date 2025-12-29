@@ -1,10 +1,10 @@
 # =============================================================================
-# ViewCreator Genesis - Multi-stage Dockerfile
+# Epiclips - Multi-stage Dockerfile
 # =============================================================================
 # Stage 1: Build stage - Install dependencies
 # Stage 2: Runtime stage - Minimal image for production
 #
-# Genesis is ViewCreator's media processing engine, providing:
+# Epiclips is an open-source AI video clipping engine, providing:
 # - Video detection (MediaPipe, DeepSORT)
 # - Full AI clipping pipeline (transcription, intelligence, rendering)
 # =============================================================================
@@ -39,9 +39,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 FROM python:3.11-slim AS runtime
 
 # Labels
-LABEL maintainer="ViewCreator"
-LABEL description="AI-powered video clipping worker with transcription, intelligence, and rendering"
-LABEL version="2.0.0"
+LABEL maintainer="akshaynstack"
+LABEL description="Epiclips - Open-source AI-powered video clipping"
+LABEL version="1.0.0"
 
 # Environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \

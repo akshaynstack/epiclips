@@ -1,0 +1,81 @@
+# Layout Detection
+
+Epiclips automatically detects video layout types for optimal rendering.
+
+## Supported Layouts
+
+### Talking Head
+Single speaker facing the camera with no screen content.
+
+```
+┌─────────────────┐
+│   ┌─────────┐   │
+│   │  Face   │   │  ← Dynamic tracking
+│   └─────────┘   │
+│                 │
+│   [Captions]    │
+└─────────────────┘
+```
+
+**Detection**: Large face in center, no screen content detected.
+
+### Screen Share
+Screen recording with optional webcam overlay in corner.
+
+```
+┌─────────────────┐
+│   ┌─────────┐   │
+│   │ Screen  │   │  ← 50%
+│   └─────────┘   │
+│   [Captions]    │
+│   ┌─────────┐   │
+│   │  Face   │   │  ← 50%
+│   └─────────┘   │
+└─────────────────┘
+```
+
+**Detection**: Screen content (code, browser, slides) with face in corner.
+
+### Podcast
+Two speakers in a podcast/interview format.
+
+```
+┌─────────────────┐
+│   ┌─────────┐   │
+│   │Speaker 1│   │  ← 50%
+│   └─────────┘   │
+│   ┌─────────┐   │
+│   │Speaker 2│   │  ← 50%
+│   └─────────┘   │
+│   [Captions]    │
+└─────────────────┘
+```
+
+**Detection**: Two similar-sized faces, not in corners.
+
+## Detection Methods
+
+### VLM Detection (Recommended)
+Uses Gemini Flash Vision for accurate layout detection:
+- Detects webcam overlays reliably
+- Distinguishes screen content vs room backgrounds
+- Identifies corner webcam positions
+
+Enable with:
+```env
+OPENROUTER_API_KEY=your_key
+USE_VLM_LAYOUT_DETECTION=true
+```
+
+### CPU Detection (Default)
+Uses OpenCV edge analysis + MediaPipe face detection:
+- No API cost
+- Fast detection
+- Good for clear layouts
+
+## Layout Transitions
+
+Epiclips can detect layout changes within a clip:
+- Transition from talking head to screen share
+- Automatic segment splitting at transition points
+- Per-segment rendering with appropriate layout

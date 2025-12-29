@@ -190,7 +190,7 @@ class WebhookService:
 
         default_headers = {
             "Content-Type": "application/json",
-            "User-Agent": "ViewCreator-Genesis/2.0",
+            "User-Agent": "Epirium-Genesis/2.0",
             "X-Webhook-Event": payload.event,
             "X-Job-Id": payload.job_id,
         }

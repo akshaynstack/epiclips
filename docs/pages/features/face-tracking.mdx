@@ -1,0 +1,49 @@
+# Face Tracking
+
+Epiclips uses multi-tier face detection to reliably track faces in any video scenario.
+
+## Detection Pipeline
+
+The face detector uses 3 backends in priority order:
+
+| Tier | Model | Best For |
+|------|-------|----------|
+| 1 | MediaPipe (short-range) | Close-up faces, primary detector |
+| 2 | MediaPipe (full-range) | Small/distant faces, webcam overlays |
+| 3 | Haar Cascade | Final fallback for edge cases |
+
+## How It Works
+
+1. **Frame Extraction** - Frames are sampled at configurable intervals (default: 10 FPS)
+2. **Face Detection** - Each frame is analyzed by the multi-tier detector
+3. **Tracking** - Faces are tracked across frames using DeepSORT
+4. **Smoothing** - 3-frame moving average for smooth camera movement
+
+## Configuration
+
+Face tracking FPS can be adjusted for different use cases:
+
+| FPS | Precision | CPU Usage | Best For |
+|-----|-----------|-----------|----------|
+| 3 | Coarse (333ms gaps) | Low | Long videos |
+| 5 | Standard | Medium | Most content |
+| 10 | High (100ms gaps) | High | Fast movements |
+| 15+ | Maximum | Very High | Action content |
+
+## Crop Modes
+
+### Talking Head
+- Face centered in upper 35% of output
+- Dynamic tracking follows face movement
+- Smooth transitions between positions
+
+### Split-Screen
+- Face in bottom 50% of output
+- Tight crop (2x face size) for close-up effect
+- Screen content in top 50%
+
+## Tips
+
+- **Lighting** - Good lighting improves detection accuracy
+- **Face Size** - Faces should be at least 1% of frame area
+- **Multiple Faces** - The detector selects the largest/most confident face

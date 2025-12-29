@@ -1,0 +1,115 @@
+# Configuration
+
+Epiclips requires API keys for AI services. This guide covers all configuration options.
+
+## Environment Variables
+
+Create a `.env` file in the project root with the following variables:
+
+```env filename=".env"
+# ============================================================
+# REQUIRED - AI Services
+# ============================================================
+
+# OpenRouter API Key - For AI clip planning
+OPENROUTER_API_KEY=your_openrouter_api_key
+
+# OpenRouter Model - Choose your model
+# Free models: google/gemini-flash-1.5-8b, meta-llama/llama-3.2-3b-instruct:free
+OPENROUTER_MODEL=google/gemini-flash-1.5-8b
+
+# Groq API Key - For fast transcription
+GROQ_API_KEY=your_groq_api_key
+
+# ============================================================
+# OPTIONAL - Enhanced Features
+# ============================================================
+
+USE_VLM_LAYOUT_DETECTION=false
+
+# ============================================================
+# OPTIONAL - Cloud Storage
+# ============================================================
+
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_S3_BUCKET=
+AWS_REGION=us-east-1
+```
+
+## Required API Keys
+
+### OpenRouter API Key
+
+Used for AI-powered clip planning and analysis.
+
+1. Go to [OpenRouter](https://openrouter.ai/keys)
+2. Create a new API key
+3. Copy it to `OPENROUTER_API_KEY`
+4. Optionally set `OPENROUTER_MODEL` to a different model
+
+import { Callout } from 'nextra/components'
+
+<Callout type="info">
+  Free models like `google/gemini-flash-1.5-8b` are available on OpenRouter.
+</Callout>
+
+### Groq API Key
+
+Used for ultra-fast transcription (216x realtime speed).
+
+1. Go to [Groq Console](https://console.groq.com/keys)
+2. Create a new API key
+3. Copy it to `GROQ_API_KEY`
+
+## Optional Configuration
+
+### AWS S3 Storage
+
+For cloud storage of rendered clips:
+
+```env
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_S3_BUCKET=my-epiclips-bucket
+AWS_REGION=us-east-1
+```
+
+### Webhooks
+
+Receive notifications when jobs complete:
+
+```env
+WEBHOOK_URL=https://your-api.com/webhook
+WEBHOOK_SECRET=your_secret_key
+```
+
+## Performance Tuning
+
+```env
+# Maximum concurrent jobs (default: 4)
+MAX_WORKERS=4
+
+# Maximum concurrent FFmpeg renders (default: 2)
+MAX_RENDER_WORKERS=2
+```
+
+## Validating Configuration
+
+After configuring, verify your setup:
+
+```bash
+# Start the server
+uv run uvicorn app.main:app --reload
+
+# Check health
+curl http://localhost:8000/health
+```
+
+Expected response:
+
+```json
+{
+  "status": "healthy"
+}
+```

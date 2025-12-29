@@ -1,7 +1,7 @@
 """
-FastAPI application entry point for ViewCreator Genesis.
+FastAPI application entry point for Epirium Genesis.
 
-Genesis is ViewCreator's media processing engine, providing:
+Genesis is Epirium's media processing engine, providing:
 1. Video detection (MediaPipe face detection, pose estimation, DeepSORT tracking)
 2. Full AI clipping pipeline (transcription, intelligence planning, rendering)
 """
@@ -14,8 +14,17 @@ import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+from dotenv import load_dotenv
+# Load environment variables from .env file
+load_dotenv()
+
+# Suppress Hugging Face Hub warnings (symlinks/Xet)
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DISABLE_XET_WARNING"] = "1"
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.routers import ai_clipping, detection, health
@@ -74,7 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global face_detector, pose_estimator, detection_pipeline, job_semaphore
 
     settings = get_settings()
-    logger.info("Starting ViewCreator Genesis...")
+    logger.info("Starting Epirium Genesis...")
 
     # Create temp directory
     os.makedirs(settings.temp_directory, exist_ok=True)
@@ -125,7 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     # Cleanup on shutdown
-    logger.info("Shutting down ViewCreator Genesis...")
+    logger.info("Shutting down Epirium Genesis...")
     face_detector = None
     pose_estimator = None
     detection_pipeline = None
@@ -158,9 +167,9 @@ def _verify_external_tools():
 
 # Create FastAPI application
 app = FastAPI(
-    title="ViewCreator Genesis",
+    title="Epirium Genesis",
     description="""
-Genesis - ViewCreator's media processing engine.
+Genesis - Epirium's media processing engine.
 
 AI-powered video processing and content creation service.
 
@@ -204,13 +213,18 @@ app.include_router(health.router, tags=["Health"])
 app.include_router(detection.router, prefix="/detect", tags=["Detection"])
 app.include_router(ai_clipping.router, tags=["AI Clipping"])
 
+# Mount static files for local outputs
+settings = get_settings()
+os.makedirs(settings.output_directory, exist_ok=True)
+app.mount("/outputs", StaticFiles(directory=settings.output_directory), name="outputs")
+
 
 @app.get("/")
 async def root():
     """Root endpoint with basic info."""
     settings = get_settings()
     return {
-        "service": "viewcreator-genesis",
+        "service": "epirium-genesis",
         "version": "2.0.0",
         "status": "running",
         "features": {

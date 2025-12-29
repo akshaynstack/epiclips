@@ -8,10 +8,20 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status, File, UploadFile, Form
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, HttpUrl, model_validator
+import json
+import tempfile
+import os
+import shutil
+from pathlib import Path
 
 from app.auth import verify_api_key
+from app.services.transcription_service import TranscriptionService, TranscriptWord, TranscriptSegment
+from app.services.intelligence_planner import IntelligencePlannerService
+from app.services.smart_layout_detector import SmartLayoutDetector
+from app.services.rendering_service import RenderingService, RenderRequest, LayoutKeyframe
 
 # Duration range type for multi-select
 DurationRangeType = Literal["short", "medium", "long"]
@@ -148,13 +158,36 @@ class ClipJobSubmitRequest(BaseModel):
                     f"start_time_seconds ({self.start_time_seconds})"
                 )
             # Check minimum range (at least 60 seconds for meaningful clip generation)
-            range_duration = self.end_time_seconds - self.start_time_seconds
-            if range_duration < 30:
-                raise ValueError(
-                    f"Selected time range ({range_duration:.1f}s) is too short. "
-                    f"Minimum is 30 seconds for clip generation."
-                )
+            if self.end_time_seconds - self.start_time_seconds < 10:
+                raise ValueError("Processing time range must be at least 10 seconds")
         return self
+
+
+# --- Direct API Models for WebGPU Frontend ---
+
+class TranscribeDirectResponse(BaseModel):
+    transcript: str
+    chunks: list[dict]
+    duration: float
+
+
+class PlanDirectRequest(BaseModel):
+    transcript: str
+    chunks: list[dict]
+
+
+class PlanDirectResponse(BaseModel):
+    clips: list[dict]
+
+
+class DetectLayoutDirectResponse(BaseModel):
+    layout_type: str
+    facecam_bbox: Optional[list[int]] = None
+    confidence: float
+
+
+class RenderDirectResponse(BaseModel):
+    clip_url: str
 
 
 class ClipArtifactResponse(BaseModel):
@@ -792,4 +825,402 @@ async def _process_job_background(
                 status=JobStatus.FAILED,
                 error=str(e),
             )
+
+
+# ============================================================================
+# Direct API Endpoints (Integration for WebGPU/Frontend)
+# ============================================================================
+
+
+@router.post("/transcribe-direct", response_model=TranscribeDirectResponse)
+async def transcribe_direct(video: UploadFile = File(...)):
+    """Directly transcribe an uploaded video using local Whisper."""
+    trans_service = TranscriptionService()
+    
+    suffix = Path(video.filename).suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await video.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+        
+    try:
+        # Create a temporary work directory
+        with tempfile.TemporaryDirectory() as work_dir:
+            # Force local whisper for direct frontend calls
+            result = await trans_service.transcribe(tmp_path, work_dir, use_local=True)
+            
+            # Format chunks for frontend
+            chunks = []
+            for segment in result.segments:
+                if segment.words:
+                    for word in segment.words:
+                        chunks.append({
+                            "text": word.word,
+                            "timestamp": [word.start_time_ms / 1000.0, word.end_time_ms / 1000.0]
+                        })
+                else:
+                    # Fallback if no word timing
+                    chunks.append({
+                        "text": segment.text,
+                        "timestamp": [segment.start_time_ms / 1000.0, segment.end_time_ms / 1000.0]
+                    })
+            
+            return {
+                "transcript": result.full_text,
+                "chunks": chunks,
+                "duration": result.duration_seconds
+            }
+    except Exception as e:
+        logger.exception("Direct transcription failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@router.post("/plan-direct", response_model=PlanDirectResponse)
+async def plan_direct(request: PlanDirectRequest):
+    """Directly plan clips using AI (OpenRouter/Gemini)."""
+    planner = IntelligencePlannerService()
+    
+    try:
+        # Convert chunks back to TranscriptSegments for the service
+        segments = []
+        # Group word chunks into segments of ~10 words for the planner
+        current_words = []
+        for i, chunk in enumerate(request.chunks):
+            current_words.append(TranscriptWord(
+                word=chunk["text"],
+                start_time_ms=int(chunk["timestamp"][0] * 1000),
+                end_time_ms=int(chunk["timestamp"][1] * 1000)
+            ))
+            
+            if len(current_words) >= 15 or i == len(request.chunks) - 1:
+                segments.append(TranscriptSegment(
+                    start_time_ms=current_words[0].start_time_ms,
+                    end_time_ms=current_words[-1].end_time_ms,
+                    text=" ".join([w.word for w in current_words]),
+                    words=current_words
+                ))
+                current_words = []
+        
+        from app.services.transcription_service import TranscriptionResult
+        trans_result = TranscriptionResult(
+            segments=segments,
+            full_text=request.transcript,
+            language="en",
+            duration_seconds=segments[-1].end_time_ms / 1000.0 if segments else 0,
+            provider="direct"
+        )
+        
+        plan = await planner.plan_clips(trans_result)
+        
+        clips = []
+        for seg in plan.segments:
+            clips.append({
+                "start": seg.start_time_ms / 1000.0,
+                "end": seg.end_time_ms / 1000.0,
+                "title": seg.summary or "Viral Clip",
+                "reason": f"Virality Score: {seg.virality_score:.1f}"
+            })
+            
+        return {"clips": clips}
+    except Exception as e:
+        logger.exception("Direct planning failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/detect-layout-direct", response_model=DetectLayoutDirectResponse)
+async def detect_layout_direct(video: UploadFile = File(...)):
+    """Directly detect video layout (talking head vs screen share)."""
+    detector = SmartLayoutDetector()
+    
+    suffix = Path(video.filename).suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await video.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+        
+    try:
+        # Use robust analysis pipeline
+        import cv2
+        cap = cv2.VideoCapture(tmp_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration_ms = int((total_frames / fps) * 1000) if fps > 0 else 0
+        cap.release()
+        
+        # Use robust analysis pipeline with dynamic sampling
+        # For long videos, we reduce FPS to avoid "stuck" processing in synchronous API calls
+        # Target ~100 samples total for the whole video
+        target_samples = 100
+        duration_sec = duration_ms / 1000
+        optimized_fps = max(0.1, min(3.0, target_samples / duration_sec)) if duration_sec > 0 else 3.0
+        
+        logger.info(f"Direct layout detection: duration={duration_sec:.1f}s, using {optimized_fps:.2f} FPS")
+        
+        analysis = await detector.analyze_clip_layout_with_speakers(
+            video_path=tmp_path,
+            start_ms=0,
+            end_ms=duration_ms,
+            frame_width=width,
+            frame_height=height,
+            sample_fps=optimized_fps
+        )
+        
+        # Map bbox to list of ints if present
+        bbox = None
+        if analysis.corner_facecam_bbox:
+            bbox = list(analysis.corner_facecam_bbox)
+            
+        return {
+            "layout_type": analysis.dominant_layout,
+            "facecam_bbox": bbox,
+            "confidence": 0.9
+        }
+    except Exception as e:
+        logger.exception("Direct layout detection failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+@router.post("/render-clip-direct", response_model=RenderDirectResponse)
+async def render_clip_direct(
+    video: UploadFile = File(...),
+    start_time: float = Form(...),
+    end_time: float = Form(...),
+    layout_type: str = Form(...),
+    face_bbox: str = Form(None), # JSON string
+    chunks: str = Form(...), # JSON string
+    caption_style: str = Form("opus"),  # Frontend style name: bold/opus/highlight/minimal/none
+    podcast_bboxes: str = Form(None),  # JSON string for podcast layout: [[x1,y1,w1,h1],[x2,y2,w2,h2]]
+    layout_keyframes: str = Form(None),  # JSON string for timeline keyframes: [{ timestampMs, layoutType, faceBbox?, podcastBboxes? }]
+):
+    """Directly render a clip with captions and layout."""
+    rendering_service = RenderingService()
+    
+    # Map frontend caption style names to backend presets
+    CAPTION_STYLE_MAP = {
+        "bold": "viral_gold",
+        "opus": "opus_bold",
+        "highlight": "bold_boxed",  # Yellow highlights
+        "minimal": "clean_white",
+        "none": None,
+    }
+    
+    # Setup temporary paths
+    suffix = Path(video.filename).suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await video.read()
+        tmp.write(content)
+        input_path = tmp.name
+        
+    output_dir = os.path.join(tempfile.gettempdir(), "rendered_clips")
+    os.makedirs(output_dir, exist_ok=True)
+    output_filename = f"clip_{int(datetime.now().timestamp())}.mp4"
+    output_path = os.path.join(output_dir, output_filename)
+    
+    try:
+        # Parse inputs
+        bbox = None
+        if face_bbox:
+            bbox_data = json.loads(face_bbox)
+            logger.info(f"[CUSTOM BBOX] Received face_bbox from frontend: {bbox_data}")
+            if bbox_data:
+                # Handle both list format [x, y, w, h] and dict format {"x": x, "y": y, "w": w, "h": h}
+                if isinstance(bbox_data, list) and len(bbox_data) >= 4:
+                    bbox = (bbox_data[0], bbox_data[1], bbox_data[2], bbox_data[3])
+                elif isinstance(bbox_data, dict):
+                    bbox = (
+                        bbox_data.get("x", bbox_data.get(0, 0)),
+                        bbox_data.get("y", bbox_data.get(1, 0)),
+                        bbox_data.get("w", bbox_data.get("width", bbox_data.get(2, 0))),
+                        bbox_data.get("h", bbox_data.get("height", bbox_data.get(3, 0))),
+                    )
+                logger.info(f"[CUSTOM BBOX] Parsed bbox tuple (may be normalized): {bbox}")
+        
+        # Parse podcast bboxes if provided
+        podcast_face_bboxes = None
+        if podcast_bboxes:
+            bboxes_data = json.loads(podcast_bboxes)
+            logger.info(f"[CUSTOM BBOX] Received podcast_bboxes from frontend: {bboxes_data}")
+            if bboxes_data and len(bboxes_data) >= 2:
+                podcast_face_bboxes = [tuple(b) for b in bboxes_data[:2]]
+                logger.info(f"[CUSTOM BBOX] Parsed podcast bboxes: {podcast_face_bboxes}")
+        
+        # Parse layout keyframes if provided (Timeline Keyframes feature)
+        parsed_keyframes = None
+        if layout_keyframes:
+            keyframes_data = json.loads(layout_keyframes)
+            logger.info(f"[KEYFRAMES] Received layout_keyframes from frontend: {keyframes_data}")
+            if keyframes_data and len(keyframes_data) > 0:
+                parsed_keyframes = []
+                for kf in keyframes_data:
+                    # Parse face bbox if present (normalize to pixels will happen later)
+                    kf_face_bbox = None
+                    if kf.get("faceBbox"):
+                        fb = kf["faceBbox"]
+                        if isinstance(fb, list) and len(fb) >= 4:
+                            kf_face_bbox = tuple(fb[:4])
+                        elif isinstance(fb, dict):
+                            kf_face_bbox = (
+                                fb.get("x", 0), fb.get("y", 0),
+                                fb.get("width", fb.get("w", 0)),
+                                fb.get("height", fb.get("h", 0))
+                            )
+                    
+                    # Parse podcast bboxes if present
+                    kf_podcast_bboxes = None
+                    if kf.get("podcastBboxes") and len(kf["podcastBboxes"]) >= 2:
+                        kf_podcast_bboxes = [tuple(b) for b in kf["podcastBboxes"][:2]]
+                    
+                    parsed_keyframes.append(LayoutKeyframe(
+                        timestamp_ms=int(kf.get("timestampMs", 0)),
+                        layout_type=kf.get("layoutType", "talking_head"),
+                        face_bbox=kf_face_bbox,
+                        podcast_bboxes=kf_podcast_bboxes,
+                    ))
+                logger.info(f"[KEYFRAMES] Parsed {len(parsed_keyframes)} keyframes")
+                
+        word_chunks = json.loads(chunks)
+        segments = []
+        # Reconstruct segments for the renderer
+        if word_chunks:
+            words = []
+            for wc in word_chunks:
+                words.append(TranscriptWord(
+                    word=wc["text"],
+                    start_time_ms=int(wc["timestamp"][0] * 1000),
+                    end_time_ms=int(wc["timestamp"][1] * 1000)
+                ))
+            
+            # Simple grouping into one segment for the whole clip to ensure captions show up
+            segments.append(TranscriptSegment(
+                start_time_ms=int(start_time * 1000),
+                end_time_ms=int(end_time * 1000),
+                text=" ".join([w.word for w in words]),
+                words=words
+            ))
+            
+        # Get dimensions
+        vw, vh = await rendering_service._get_video_dimensions(input_path)
+        
+        # Resolve caption style
+        style_preset_name = CAPTION_STYLE_MAP.get(caption_style, "opus_bold")
+        resolved_caption_style = get_caption_preset(style_preset_name) if style_preset_name else None
+        
+        # Convert normalized bbox to pixel values if needed
+        pixel_bbox = None
+        if bbox:
+            # Check if values are normalized (0-1 range) or already pixel values
+            if all(0 <= v <= 1.0 for v in bbox):
+                # Normalized values - convert to pixels
+                pixel_bbox = (
+                    int(bbox[0] * vw),  # x
+                    int(bbox[1] * vh),  # y
+                    int(bbox[2] * vw),  # w
+                    int(bbox[3] * vh),  # h
+                )
+                logger.info(f"[CUSTOM BBOX] Converted normalized to pixels: {bbox} -> {pixel_bbox} (video: {vw}x{vh})")
+            else:
+                # Already pixel values
+                pixel_bbox = tuple(int(v) for v in bbox)
+                logger.info(f"[CUSTOM BBOX] Using pixel values directly: {pixel_bbox}")
+        
+        # Determine layout type - handle various frontend naming conventions
+        # "custom" = user drew a speaker box -> use screen_share with their bbox
+        # "split_screen" / "screen_share" = explicit split screen request
+        if layout_type == "podcast" and podcast_face_bboxes:
+            render_layout_type = "podcast"
+            logger.info(f"[LAYOUT] Using podcast layout with {len(podcast_face_bboxes)} faces")
+        elif layout_type in ("screen_share", "split_screen") or (layout_type == "custom" and pixel_bbox):
+            render_layout_type = "screen_share"
+            logger.info(f"[LAYOUT] Using screen_share/split layout (frontend sent: {layout_type}, has bbox: {pixel_bbox is not None})")
+        else:
+            render_layout_type = "talking_head"
+            logger.info(f"[LAYOUT] Using talking_head layout (frontend sent: {layout_type})")
+        
+        # Check if we should enable split screen mode - requires both screen_share layout AND a bbox
+        is_split_screen = render_layout_type == "screen_share" and pixel_bbox is not None
+        
+        # Check if this is a user-drawn custom box (Custom mode in frontend)
+        is_custom_bbox = layout_type == "custom" and pixel_bbox is not None
+        
+        # Convert keyframe bboxes to pixel values if they're normalized
+        pixel_keyframes = None
+        if parsed_keyframes:
+            pixel_keyframes = []
+            for kf in parsed_keyframes:
+                pixel_face_bbox = None
+                if kf.face_bbox:
+                    fb = kf.face_bbox
+                    # Check if normalized (all values 0-1)
+                    if all(0 <= v <= 1.0 for v in fb):
+                        pixel_face_bbox = (
+                            int(fb[0] * vw), int(fb[1] * vh),
+                            int(fb[2] * vw), int(fb[3] * vh)
+                        )
+                    else:
+                        pixel_face_bbox = tuple(int(v) for v in fb)
+                
+                pixel_podcast_bboxes = None
+                if kf.podcast_bboxes:
+                    pixel_podcast_bboxes = []
+                    for pb in kf.podcast_bboxes:
+                        if all(0 <= v <= 1.0 for v in pb):
+                            pixel_podcast_bboxes.append((
+                                int(pb[0] * vw), int(pb[1] * vh),
+                                int(pb[2] * vw), int(pb[3] * vh)
+                            ))
+                        else:
+                            pixel_podcast_bboxes.append(tuple(int(v) for v in pb))
+                
+                pixel_keyframes.append(LayoutKeyframe(
+                    timestamp_ms=kf.timestamp_ms,
+                    layout_type=kf.layout_type,
+                    face_bbox=pixel_face_bbox,
+                    podcast_bboxes=pixel_podcast_bboxes,
+                ))
+            logger.info(f"[KEYFRAMES] Converted {len(pixel_keyframes)} keyframes to pixel values")
+        
+        request = RenderRequest(
+            video_path=input_path,
+            output_path=output_path,
+            start_time_ms=int(start_time * 1000),
+            end_time_ms=int(end_time * 1000),
+            source_width=vw,
+            source_height=vh,
+            layout_type=render_layout_type,
+            transcript_segments=segments if resolved_caption_style else None,
+            caption_style=resolved_caption_style,
+            has_embedded_facecam=is_split_screen,
+            corner_facecam_bbox=pixel_bbox,
+            is_custom_bbox=is_custom_bbox,  # User-drawn boxes use minimal padding
+            podcast_face_bboxes=podcast_face_bboxes,
+            layout_keyframes=pixel_keyframes,  # Timeline keyframes for multi-layout rendering
+        )
+
+        
+        logger.info(f"[RENDER] RenderRequest: layout={render_layout_type}, has_facecam={is_split_screen}, bbox={pixel_bbox}")
+        
+        result = await rendering_service.render_clip(request)
+        
+        # Return the file directly as a response
+        # The frontend expects a blob
+        return FileResponse(
+            result.output_path, 
+            media_type="video/mp4",
+            filename=output_filename
+        )
+        
+    except Exception as e:
+        logger.exception("Direct rendering failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(input_path):
+            os.unlink(input_path)
 

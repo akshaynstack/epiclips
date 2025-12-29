@@ -1,0 +1,148 @@
+# Quick Start
+
+Get your first AI-generated clip in under 5 minutes.
+
+## 1. Start the Services
+
+import { Tabs, Tab } from 'nextra/components'
+
+<Tabs items={['Docker', 'Manual']}>
+  <Tab>
+    ```bash
+    docker-compose up -d
+    ```
+  </Tab>
+  <Tab>
+    ```bash
+    # Terminal 1: Backend
+    uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+    # Terminal 2: Frontend
+    cd frontend && npm run dev
+    ```
+  </Tab>
+</Tabs>
+
+## 2. Open the Frontend
+
+Navigate to [http://localhost:3000](http://localhost:3000) in your browser.
+
+## 3. Submit a Video
+
+1. Paste a YouTube URL in the input field
+2. Select number of clips (1-10)
+3. Choose duration preference (short/medium/long)
+4. Select a caption style
+5. Click **Generate Clips**
+
+## Using the API Directly
+
+You can also use the REST API directly:
+
+```bash
+curl -X POST http://localhost:8000/ai-clipping/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "video_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "max_clips": 3,
+    "duration_ranges": ["short", "medium"],
+    "include_captions": true,
+    "caption_preset": "viral_gold"
+  }'
+```
+
+Response:
+
+```json
+{
+  "job_id": "abc123-def456-...",
+  "status": "accepted",
+  "message": "Job queued for processing",
+  "estimated_processing_minutes": 5
+}
+```
+
+## 4. Check Job Status
+
+```bash
+curl http://localhost:8000/ai-clipping/jobs/{job_id}
+```
+
+Status progression:
+1. `accepted` → Job queued
+2. `downloading` → Fetching video
+3. `transcribing` → Extracting transcript
+4. `planning` → AI selecting clips
+5. `detecting` → Analyzing faces
+6. `rendering` → Creating clips
+7. `completed` → Done! 🎉
+
+## 5. Download Your Clips
+
+When status is `completed`, the response includes clip URLs:
+
+```json
+{
+  "status": "completed",
+  "output": {
+    "clips": [
+      {
+        "clip_index": 0,
+        "s3_url": "https://...",
+        "duration_ms": 45000,
+        "virality_score": 0.92,
+        "summary": "Key insight about..."
+      }
+    ]
+  }
+}
+```
+
+## Caption Style Options
+
+| Preset | Look |
+|--------|------|
+| `viral_gold` | White text, gold highlight |
+| `clean_white` | White text, blue highlight |
+| `neon_pop` | Cyan text, magenta highlight |
+| `bold_boxed` | White text, red highlight |
+| `opus_bold` | White text, green highlight |
+
+## Example: Python Script
+
+```python
+import requests
+import time
+
+# Submit job
+response = requests.post(
+    "http://localhost:8000/ai-clipping/jobs",
+    json={
+        "video_url": "https://www.youtube.com/watch?v=VIDEO_ID",
+        "max_clips": 3,
+        "caption_preset": "viral_gold"
+    }
+)
+job_id = response.json()["job_id"]
+
+# Poll for completion
+while True:
+    status = requests.get(f"http://localhost:8000/ai-clipping/jobs/{job_id}").json()
+    print(f"Status: {status['status']} ({status.get('progress_percent', 0)}%)")
+    
+    if status["status"] == "completed":
+        for clip in status["output"]["clips"]:
+            print(f"Clip {clip['clip_index']}: {clip['s3_url']}")
+        break
+    elif status["status"] == "failed":
+        print(f"Error: {status.get('error')}")
+        break
+    
+    time.sleep(5)
+```
+
+## Next Steps
+
+- [Features](/features/ai-clipping) - Learn about all features
+- [API Reference](/api-reference/endpoints) - Full API documentation
+- [Deployment](/deployment/docker) - Deploy to production

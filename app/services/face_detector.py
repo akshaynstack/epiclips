@@ -291,38 +291,64 @@ class FaceDetector:
         height: int,
         use_fullrange: bool = False,
     ) -> List[FaceDetectionResult]:
-        """Detect faces using MediaPipe FaceDetection."""
+        """
+        Detect faces using MediaPipe FaceDetection.
+        
+        Creates a fresh detector instance per call to avoid graph corruption
+        in concurrent usage scenarios. The 'Empty packets' error occurs when
+        multiple threads share a MediaPipe graph instance.
+        """
         detections = []
 
-        # Select detector based on range
-        detector = self._mediapipe_detector_fullrange if use_fullrange else self._mediapipe_detector
-        if detector is None:
-            return detections
+        try:
+            import mediapipe as mp
+            
+            # Create fresh detector instance for this call (thread-safe)
+            # This avoids MediaPipe graph corruption under concurrent usage
+            if use_fullrange:
+                detector = mp.solutions.face_detection.FaceDetection(
+                    model_selection=1,  # Full-range model for small/distant faces
+                    min_detection_confidence=max(0.3, self.confidence_threshold - 0.2),
+                )
+            else:
+                detector = mp.solutions.face_detection.FaceDetection(
+                    model_selection=0,  # Short-range model for close faces
+                    min_detection_confidence=self.confidence_threshold,
+                )
+            
+            # MediaPipe expects RGB format
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            results = detector.process(rgb_image)
 
-        # MediaPipe expects RGB format
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = detector.process(rgb_image)
-
-        if results.detections:
-            for detection in results.detections:
-                bbox = detection.location_data.relative_bounding_box
-                confidence = detection.score[0]
-                
-                # Convert relative coordinates to absolute
-                x = int(bbox.xmin * width)
-                y = int(bbox.ymin * height)
-                w = int(bbox.width * width)
-                h = int(bbox.height * height)
-                
-                # Minimum face size filter (reduced for small webcam overlays)
-                if w > 20 and h > 20:
-                    detections.append(FaceDetectionResult(
-                        bbox=(x, y, w, h),
-                        confidence=confidence,
-                        detection_method="mediapipe_fullrange" if use_fullrange else "mediapipe",
-                    ))
+            if results.detections:
+                for detection in results.detections:
+                    bbox = detection.location_data.relative_bounding_box
+                    confidence = detection.score[0]
+                    
+                    # Convert relative coordinates to absolute
+                    x = int(bbox.xmin * width)
+                    y = int(bbox.ymin * height)
+                    w = int(bbox.width * width)
+                    h = int(bbox.height * height)
+                    
+                    # Minimum face size filter (reduced for small webcam overlays)
+                    if w > 20 and h > 20:
+                        detections.append(FaceDetectionResult(
+                            bbox=(x, y, w, h),
+                            confidence=confidence,
+                            detection_method="mediapipe_fullrange" if use_fullrange else "mediapipe",
+                        ))
+            
+            # Clean up detector resources immediately
+            detector.close()
+            
+        except ImportError:
+            logger.warning("MediaPipe not available for detection")
+        except Exception as e:
+            logger.warning(f"MediaPipe {'full-range' if use_fullrange else 'short-range'} detection failed: {e}")
 
         return detections
+
 
     def _detect_with_dnn(
         self,

@@ -84,4 +84,16 @@ logs/
 
 scripts
 
+output
+test_clips
+video_cache
 
+# Frontend (Next.js)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Docs (Nextra)
+docs/node_modules/
+docs/.next/
+docs/out/

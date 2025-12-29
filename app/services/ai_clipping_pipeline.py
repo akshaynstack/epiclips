@@ -45,10 +45,10 @@ from app.services.rendering_service import (
     RenderResult,
     RenderingService,
 )
-from app.services.s3_upload_service import (
+from app.services.local_storage_service import (
     ClipArtifact,
     JobOutput,
-    S3UploadService,
+    LocalStorageService,
 )
 from app.services.transcription_service import (
     TranscriptionResult,
@@ -172,7 +172,7 @@ class AIClippingPipeline:
         self.transcription_service = TranscriptionService()
         self.intelligence_planner = IntelligencePlannerService()
         self.rendering_service = RenderingService()
-        self.s3_upload_service = S3UploadService()
+        self.storage_service = LocalStorageService()
         # ContentRegionDetector removed - unused, superseded by SmartLayoutDetector
         self.smart_layout_detector = SmartLayoutDetector()
 
@@ -346,7 +346,7 @@ class AIClippingPipeline:
             logger.info(f"Transcription complete: {len(transcription_result.segments)} segments")
             
             # Upload transcript artifact
-            transcript_upload = await self.s3_upload_service.upload_json_artifact(
+            transcript_upload = await self.storage_service.upload_json_artifact(
                 data={
                     "segments": [asdict(s) for s in transcription_result.segments],
                     "full_text": transcription_result.full_text,
@@ -378,7 +378,7 @@ class AIClippingPipeline:
             logger.info(f"Planned {len(clip_plan.segments)} clips")
             
             # Upload plan artifact
-            plan_upload = await self.s3_upload_service.upload_json_artifact(
+            plan_upload = await self.storage_service.upload_json_artifact(
                 data={
                     "segments": [asdict(s) for s in clip_plan.segments],
                     "total_clips": clip_plan.total_clips,
@@ -586,7 +586,7 @@ class AIClippingPipeline:
             
             async def upload_single_clip(i: int, clip_path: str, segment: ClipPlanSegment) -> ClipArtifact:
                 """Upload a single clip to S3."""
-                upload_result = await self.s3_upload_service.upload_clip(
+                upload_result = await self.storage_service.upload_clip(
                     local_path=clip_path,
                     job_id=job_id,
                     clip_index=i,
@@ -640,7 +640,7 @@ class AIClippingPipeline:
             )
             
             # Upload job manifest
-            await self.s3_upload_service.upload_job_output(job_output)
+            await self.storage_service.upload_job_output(job_output)
             
             # Build webhook output payload with clip URLs and metadata
             # Include all clip fields - API DTO now supports these

@@ -149,8 +149,8 @@ class IntelligencePlannerService:
                 timeout=httpx.Timeout(300.0, connect=30.0),
                 headers={
                     "Authorization": f"Bearer {self.settings.openrouter_api_key}",
-                    "HTTP-Referer": "https://viewcreator.com",
-                    "X-Title": "ViewCreator AI Clipping Agent",
+                    "HTTP-Referer": "https://epirium.ai",
+                    "X-Title": "Epirium AI Clipping Agent",
                 },
             )
         return self._http_client
@@ -283,15 +283,15 @@ class IntelligencePlannerService:
             transcript,
         )
         
-        # Call Gemini via OpenRouter with retry for JSON parsing failures
-        logger.info(f"Calling Gemini ({self.settings.gemini_model}) for clip planning...")
+        # Call LLM via OpenRouter with retry for JSON parsing failures
+        logger.info(f"Calling {self.settings.openrouter_model} via OpenRouter...")
         
         max_retries = 3
         last_error = None
         
         for attempt in range(max_retries):
             response = await self._call_openrouter(
-                model=self.settings.gemini_model,
+                model=self.settings.openrouter_model,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=8000,
@@ -384,14 +384,12 @@ STRICT RULES:
         if not transcript:
             return "[No transcript available]"
         
-        # Debug: log segment structure
-        if transcript:
+        # Debug: log segment structure (DEBUG level)
+        if transcript and logger.isEnabledFor(logging.DEBUG):
             first_seg = transcript[0]
-            logger.info(f"First segment type: {type(first_seg)}, attrs: {dir(first_seg) if hasattr(first_seg, '__dict__') else 'N/A'}")
+            logger.debug(f"First segment type: {type(first_seg)}")
             if hasattr(first_seg, 'text'):
-                logger.info(f"First segment text: '{first_seg.text[:100] if first_seg.text else 'EMPTY'}'")
-            elif hasattr(first_seg, '__dict__'):
-                logger.info(f"First segment dict: {first_seg.__dict__}")
+                logger.debug(f"First segment text sample: '{first_seg.text[:50]}...'")
         
         lines = []
         for seg in transcript:
@@ -526,7 +524,7 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
         try:
             content = response["choices"][0]["message"]["content"]
             
-            logger.info(f"Raw Gemini response content (first 1000 chars): {content[:1000]}")
+            logger.debug(f"Raw Gemini response content: {content[:1000]}")
             
             # Try to parse JSON
             try:
@@ -543,7 +541,7 @@ Below are {len(frame_images)} sample frames from the video at regular intervals.
                         f"Failed to parse JSON from response: {content[:200]}"
                     )
             
-            logger.info(f"Parsed response structure: {type(parsed).__name__}, keys: {parsed.keys() if isinstance(parsed, dict) else 'N/A'}")
+            logger.debug(f"Parsed response structure: {type(parsed).__name__}, keys: {parsed.keys() if isinstance(parsed, dict) else 'N/A'}")
             
             # Handle array response (clips directly)
             if isinstance(parsed, list):

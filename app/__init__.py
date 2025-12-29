@@ -1,5 +1,5 @@
 """
-ViewCreator Clipping Worker
+Epirium Clipping Worker
 
 A FastAPI-based detection service for video analysis using MediaPipe, Haar Cascade, and DeepSORT.
 """

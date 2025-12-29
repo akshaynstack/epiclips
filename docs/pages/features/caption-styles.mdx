@@ -1,0 +1,58 @@
+# Caption Styles
+
+Epiclips supports customizable word-by-word highlighted captions in viral short-form style.
+
+## Built-in Presets
+
+| Preset | Primary | Highlight | Style |
+|--------|---------|-----------|-------|
+| `viral_gold` | White | Gold (#FFD700) | Classic viral |
+| `clean_white` | White | Blue (#3B82F6) | Professional |
+| `neon_pop` | Cyan | Magenta (#FF00FF) | Bold neon |
+| `bold_boxed` | White | Red (#EF4444) | High contrast |
+| `opus_bold` | White | Green (#22C55E) | OpusClip style |
+
+## Word-by-Word Highlighting
+
+Each word is highlighted sequentially as it's spoken:
+
+```
+Time: 0.0s  → "THIS is how you"        (THIS highlighted)
+Time: 0.3s  → "This IS how you"        (IS highlighted)
+Time: 0.5s  → "This is HOW you"        (HOW highlighted)
+```
+
+## Custom Styles
+
+You can provide custom caption styles via the API:
+
+```json
+{
+  "caption_style": {
+    "font_name": "Arial Black",
+    "font_size": 72,
+    "primary_color": "#FFFFFF",
+    "highlight_color": "#FFD700",
+    "outline_color": "#000000",
+    "outline_width": 4,
+    "position": "center",
+    "max_words_per_line": 4,
+    "bold": true,
+    "uppercase": true
+  }
+}
+```
+
+## Position Options
+
+| Position | Description |
+|----------|-------------|
+| `top` | Upper third of video |
+| `center` | Middle of video (default) |
+| `bottom` | Lower third of video |
+
+## Technical Details
+
+- **Format**: ASS (Advanced SubStation Alpha) subtitles
+- **Rendering**: Burned into video via FFmpeg
+- **Font Support**: System fonts (Arial Black, Liberation Sans, etc.)

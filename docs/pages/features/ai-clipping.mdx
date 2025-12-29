@@ -1,0 +1,64 @@
+# AI Clipping
+
+Epiclips uses AI to automatically identify the most viral-worthy segments from long-form videos.
+
+## How It Works
+
+1. **Transcription** - Audio is transcribed with word-level timestamps using Groq Whisper
+2. **Analysis** - Gemini AI analyzes the transcript to identify engaging moments
+3. **Selection** - The AI selects clips based on virality indicators
+4. **Rendering** - Selected segments are rendered with face tracking and captions
+
+## Virality Indicators
+
+The AI looks for:
+
+- **Strong Hooks** - Attention-grabbing opening lines
+- **Emotional Peaks** - Moments of excitement, surprise, or insight
+- **Key Insights** - Valuable information or unique perspectives
+- **Story Arcs** - Complete narrative moments
+- **Quotable Moments** - Memorable statements
+
+## Configuration Options
+
+### Duration Ranges
+
+| Range | Duration | Best For |
+|-------|----------|----------|
+| `short` | 15-30s | TikTok, Reels |
+| `medium` | 30-60s | YouTube Shorts |
+| `long` | 60-120s | Longer content |
+
+### Clip Count
+
+You can request 1-10 clips per video. The AI will select the top N moments by virality score.
+
+## API Usage
+
+```json
+{
+  "video_url": "https://youtube.com/watch?v=...",
+  "max_clips": 5,
+  "duration_ranges": ["short", "medium"],
+  "include_captions": true,
+  "caption_preset": "viral_gold"
+}
+```
+
+## Virality Scoring
+
+Each clip receives a virality score from 0.0 to 1.0:
+
+| Score | Meaning |
+|-------|---------|
+| 0.9+ | Excellent viral potential |
+| 0.7-0.9 | Good engagement expected |
+| 0.5-0.7 | Moderate interest |
+| Under 0.5 | Lower priority |
+
+## Tips for Better Results
+
+1. **Quality Source** - Start with high-quality, engaging source content
+2. **Clear Audio** - Better transcription leads to better clip selection
+3. **Varied Content** - Videos with multiple topics yield diverse clips
+4. **Optimal Length** - 30-120 minute videos work best

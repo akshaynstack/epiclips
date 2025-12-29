@@ -1,0 +1,133 @@
+# Installation
+
+This guide covers how to install Epiclips on your system.
+
+## Prerequisites
+
+Before installing Epiclips, ensure you have:
+
+- **Python 3.11** - Required for MediaPipe 0.10.9 compatibility. [Download Python](https://python.org)
+- **Node.js 18+** - [Download Node.js](https://nodejs.org)
+- **FFmpeg** - Required for video processing (available at [ffmpeg.org](https://ffmpeg.org))
+- **uv** (Recommended) - Fast Python package manager [Install uv](https://github.com/astral-sh/uv)
+- **Docker** (optional) - For containerized deployment
+
+### Installing FFmpeg
+
+import { Tabs, Tab } from 'nextra/components'
+
+<Tabs items={['macOS', 'Ubuntu/Debian', 'Windows']}>
+  <Tab>
+    ```bash
+    brew install ffmpeg
+    ```
+  </Tab>
+  <Tab>
+    ```bash
+    sudo apt update
+    sudo apt install ffmpeg
+    ```
+  </Tab>
+  <Tab>
+    Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH.
+  </Tab>
+</Tabs>
+
+## Installation Methods
+
+### Option 1: Docker (Recommended)
+
+The easiest way to run Epiclips is with Docker Compose.
+
+```bash
+# Clone the repository
+git clone https://github.com/akshaynstack/epiclips.git
+cd epiclips
+
+# Copy environment file
+cp .env.example .env
+
+# Edit .env with your API keys
+nano .env
+
+# Start with Docker Compose
+docker-compose up -d
+```
+
+The API will be at `http://localhost:8000` and frontend at `http://localhost:3000`.
+
+### Option 2: Manual Installation (with uv)
+
+[uv](https://github.com/astral-sh/uv) is the recommended way to manage the backend environment as it ensures consistent dependency resolution and handles the correct Python version.
+
+```bash
+# Clone repository
+git clone https://github.com/akshaynstack/epiclips.git
+cd epiclips
+
+# Install dependencies (Python 3.11 required)
+uv sync --python 3.11
+
+# Copy environment file
+cp .env.example .env
+```
+
+### Option 3: Manual Installation (with venv)
+
+> [!WARNING]
+> Python 3.12+ is NOT currently supported due to MediaPipe 0.10.9 wheel availability. Use Python 3.11.
+
+```bash
+# Create virtual environment
+python3.11 -m venv .venv
+
+# Activate virtual environment
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+#### Frontend Setup
+
+```bash
+# Navigate to frontend directory
+cd frontend
+
+# Install dependencies
+npm install
+```
+
+## Verifying Installation
+
+After installation, verify everything is working:
+
+```bash
+# Check Python dependencies
+python -c "import mediapipe; print('MediaPipe OK')"
+python -c "import cv2; print('OpenCV OK')"
+
+# Check FFmpeg
+ffmpeg -version
+
+# Start the backend via uv
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# OR via manual venv
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Visit `http://localhost:8000/health` - you should see:
+
+```json
+{
+  "status": "healthy"
+}
+```
+
+## Next Steps
+
+Now that Epiclips is installed, proceed to:
+
+- [Configuration](/getting-started/configuration) - Set up API keys
+- [Quick Start](/getting-started/quick-start) - Create your first clip

@@ -1,0 +1,109 @@
+# Docker Deployment
+
+Deploy Epiclips with Docker for production use.
+
+## Quick Start
+
+```bash
+# Clone repository
+git clone https://github.com/akshaynstack/epiclips.git
+cd epiclips
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# Start services
+docker-compose up -d
+```
+
+## Docker Compose Configuration
+
+The default `docker-compose.yml` includes:
+
+```yaml
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./output:/app/output
+      - ./video_cache:/app/video_cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    depends_on:
+      - backend
+```
+
+## Production Considerations
+
+### Resource Requirements
+
+| Component | Min RAM | Recommended RAM | CPU |
+|-----------|---------|-----------------|-----|
+| Backend | 2 GB | 4-8 GB | 2-4 cores |
+| Frontend | 512 MB | 1 GB | 1 core |
+| FFmpeg | 2 GB | 4 GB | 2-4 cores |
+
+### Environment Variables
+
+For production, set:
+
+```env
+# Performance
+MAX_WORKERS=4
+MAX_RENDER_WORKERS=2
+
+# Security (if using S3)
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+```
+
+### Scaling
+
+For high-volume processing:
+
+```yaml
+# docker-compose.prod.yml
+services:
+  backend:
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 8G
+```
+
+## Troubleshooting
+
+### Memory Issues
+
+If you see OOM errors:
+
+```bash
+# Reduce concurrent renders
+MAX_RENDER_WORKERS=1 docker-compose up -d
+```
+
+### FFmpeg Issues
+
+Ensure FFmpeg is in the container:
+
+```bash
+docker-compose exec backend ffmpeg -version
+```

@@ -43,6 +43,19 @@ class CropTimeline:
 
 
 @dataclass
+class LayoutKeyframe:
+    """A keyframe defining layout at a specific timestamp for timeline-based rendering.
+    
+    Enables users to set different layouts and crop boxes at specific timestamps
+    within a clip, allowing complex videos with multiple layout transitions.
+    """
+    timestamp_ms: int
+    layout_type: Literal["talking_head", "screen_share", "podcast"]
+    face_bbox: Optional[tuple[int, int, int, int]] = None  # (x, y, w, h) for facecam
+    podcast_bboxes: Optional[list[tuple[int, int, int, int]]] = None  # For podcast mode
+
+
+@dataclass
 class RenderRequest:
     """Request for rendering a clip."""
     
@@ -52,7 +65,7 @@ class RenderRequest:
     end_time_ms: int
     source_width: int
     source_height: int
-    layout_type: Literal["talking_head", "screen_share"]
+    layout_type: Literal["talking_head", "screen_share", "podcast"]
     
     # Crop timelines for dynamic panning
     primary_timeline: Optional[CropTimeline] = None
@@ -69,6 +82,18 @@ class RenderRequest:
     # Corner facecam bbox (x, y, w, h) - for split screen layouts
     # This tells the renderer WHERE the corner webcam is, so it crops that instead of main face
     corner_facecam_bbox: Optional[tuple[int, int, int, int]] = None
+    
+    # Flag to indicate if the bbox was user-drawn (Custom mode) vs auto-detected
+    # User-drawn boxes should use minimal padding; auto-detected need expansion
+    is_custom_bbox: bool = False
+    
+    # For podcast layout: list of 2 face bboxes for side-by-side rendering
+    podcast_face_bboxes: Optional[list[tuple[int, int, int, int]]] = None
+    
+    # Timeline keyframes for multi-layout clips (Advanced Custom Mode)
+    # When provided, the clip is rendered in segments with different layouts at each keyframe
+    layout_keyframes: Optional[list[LayoutKeyframe]] = None
+
 
 
 @dataclass
@@ -95,12 +120,30 @@ class RenderingService:
         self.settings = get_settings()
         self.caption_generator = CaptionGeneratorService()
         self._verify_ffmpeg()
+        
+        # Get fonts directory path (relative to project root)
+        self.fonts_dir = self._get_fonts_dir()
+
+    def _get_fonts_dir(self) -> str:
+        """Get the path to the project's fonts directory."""
+        # Get the project root (parent of app directory)
+        current_file = Path(__file__)  # app/services/rendering_service.py
+        project_root = current_file.parent.parent.parent  # Go up 3 levels to project root
+        fonts_path = project_root / "fonts"
+        
+        if fonts_path.exists():
+            logger.debug(f"Fonts directory found: {fonts_path}")
+            return str(fonts_path)
+        else:
+            logger.warning(f"Fonts directory not found at {fonts_path}, using system fonts")
+            return ""
 
     def _verify_ffmpeg(self):
         """Verify ffmpeg is available."""
         if not shutil.which("ffmpeg"):
             raise RuntimeError("ffmpeg not found in PATH")
         logger.info("FFmpeg available")
+
 
     async def render_clip(self, request: RenderRequest) -> RenderResult:
         """
@@ -137,10 +180,22 @@ class RenderingService:
                 clip_end_ms=request.end_time_ms,
                 output_path=caption_path,
                 caption_style=request.caption_style,
+                layout_type=request.layout_type,  # Dynamic position: center for split-screen, bottom for talking head
             )
+
         
         # Choose rendering method based on layout and timelines
-        if (
+        # Priority: layout_keyframes > podcast > split > focus > static
+        
+        if request.layout_keyframes and len(request.layout_keyframes) > 0:
+            # Timeline Keyframes: Multi-layout rendering with transitions
+            logger.info(f"Using timeline keyframes mode ({len(request.layout_keyframes)} keyframes)")
+            await self._render_with_keyframes(request, caption_path, duration_ms)
+        elif request.layout_type == "podcast" and request.podcast_face_bboxes:
+            # Podcast: side-by-side 2-up layout for multi-speaker videos
+            logger.info("Using podcast mode (side-by-side 2-up)")
+            await self._render_podcast_mode(request, caption_path, duration_ms)
+        elif (
             request.layout_type == "screen_share"
             and request.primary_timeline
             and request.secondary_timeline
@@ -151,6 +206,15 @@ class RenderingService:
             else:
                 # Fallback to standard stack mode
                 await self._render_stack_mode(request, caption_path, duration_ms)
+        elif (
+            request.layout_type == "screen_share"
+            and request.corner_facecam_bbox
+            and self.settings.use_split_layout
+        ):
+            # NEW: Split screen using corner_facecam_bbox (Direct API path)
+            # This handles the case where we have bbox but no tracking timelines
+            logger.info("Using split mode with static bbox (Direct API)")
+            await self._render_split_mode_static(request, caption_path, duration_ms)
         elif request.layout_type == "talking_head" and request.primary_timeline:
             # Talking head: single 9:16 full-height crop following the face
             await self._render_focus_mode(request, caption_path, duration_ms)
@@ -301,6 +365,450 @@ class RenderingService:
                         os.remove(path)
                     except Exception:
                         pass
+
+    async def _render_split_mode_static(
+        self,
+        request: RenderRequest,
+        caption_path: Optional[str],
+        duration_ms: int,
+    ) -> None:
+        """
+        Render split layout using only corner_facecam_bbox (no tracking timelines).
+        
+        This is used by the Direct API where we skip full detection for speed,
+        but still have the detected webcam bounding box.
+        
+        Layout (top to bottom):
+        - Screen content: 50% (top) - static center crop
+        - Speaker face: 50% (bottom) - cropped from corner_facecam_bbox
+        - Captions: Overlaid on top of combined video
+        """
+        assert request.corner_facecam_bbox, "corner_facecam_bbox required for static split mode"
+        
+        source_w = request.source_width
+        source_h = request.source_height
+        
+        # Get actual video dimensions
+        actual_width, actual_height = await self._get_video_dimensions(request.video_path)
+        if actual_width > 0 and actual_height > 0:
+            source_w = actual_width
+            source_h = actual_height
+        
+        # Calculate region heights for split layout
+        total_height = self.settings.target_output_height
+        screen_height = int(total_height * self.settings.split_screen_ratio)
+        face_height = total_height - screen_height
+        
+        logger.info(
+            f"Static split mode: source={source_w}x{source_h}, "
+            f"screen={screen_height}px, face={face_height}px, bbox={request.corner_facecam_bbox}"
+        )
+        
+        output_dir = os.path.dirname(request.output_path)
+        timestamp = os.path.basename(request.output_path).replace(".mp4", "")
+        temp_screen_path = os.path.join(output_dir, f"temp_screen_{timestamp}.mp4")
+        temp_face_path = os.path.join(output_dir, f"temp_face_{timestamp}.mp4")
+        
+        try:
+            # Pass 1: Render screen content (TOP 50%) - static center crop
+            logger.debug("Static split - Pass 1: Rendering screen content...")
+            await self._render_static_screen_crop(
+                input_path=request.video_path,
+                output_path=temp_screen_path,
+                source_width=source_w,
+                source_height=source_h,
+                target_width=self.settings.target_output_width,
+                target_height=screen_height,
+                start_time_ms=request.start_time_ms,
+                duration_ms=duration_ms,
+            )
+            
+            # Pass 2: Render face crop (BOTTOM 50%) - from corner_facecam_bbox  
+            logger.debug("Static split - Pass 2: Rendering face from bbox...")
+            await self._render_static_face_crop(
+                input_path=request.video_path,
+                output_path=temp_face_path,
+                source_width=source_w,
+                source_height=source_h,
+                corner_facecam_bbox=request.corner_facecam_bbox,
+                target_width=self.settings.target_output_width,
+                target_height=face_height,
+                start_time_ms=request.start_time_ms,
+                duration_ms=duration_ms,
+                is_custom_bbox=request.is_custom_bbox,  # Use minimal padding for custom boxes
+            )
+
+            
+            # Pass 3: Merge with vstack and overlay captions
+            logger.debug("Static split - Pass 3: Merging with captions...")
+            await self._vstack_split_with_overlay(
+                screen_path=temp_screen_path,
+                face_path=temp_face_path,
+                output_path=request.output_path,
+                caption_path=caption_path,
+                original_video_path=request.video_path,
+                start_time_ms=request.start_time_ms,
+                duration_ms=duration_ms,
+            )
+            
+        finally:
+            for path in [temp_screen_path, temp_face_path]:
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+
+    async def _render_podcast_mode(
+        self,
+        request: RenderRequest,
+        caption_path: Optional[str],
+        duration_ms: int,
+    ) -> None:
+        """
+        Render podcast layout with 2 speakers stacked top/bottom.
+
+        Layout (9:16 / 1080x1920):
+        +----------------------+
+        |       Face 1         |  <- Top half, 1080x960
+        |      (960px)         |
+        +----------------------+
+        |       Face 2         |  <- Bottom half, 1080x960
+        |      (960px)         |
+        +----------------------+
+        |     CAPTIONS         |
+        +----------------------+
+        """
+        assert request.podcast_face_bboxes and len(request.podcast_face_bboxes) >= 2, \
+            "podcast_face_bboxes requires at least 2 faces"
+        
+        source_w = request.source_width
+        source_h = request.source_height
+        
+        # Get actual video dimensions
+        actual_width, actual_height = await self._get_video_dimensions(request.video_path)
+        if actual_width > 0 and actual_height > 0:
+            source_w = actual_width
+            source_h = actual_height
+        
+        # Each speaker gets half the height (960px each for 1920px total)
+        panel_width = self.settings.target_output_width   # 1080px full width
+        panel_height = self.settings.target_output_height // 2  # 960px each
+        
+        logger.info(
+            f"Podcast mode (vstack): source={source_w}x{source_h}, "
+            f"panels={panel_width}x{panel_height} each, "
+            f"faces={request.podcast_face_bboxes}"
+        )
+        
+        output_dir = os.path.dirname(request.output_path)
+        timestamp = os.path.basename(request.output_path).replace(".mp4", "")
+        temp_face1_path = os.path.join(output_dir, f"temp_podcast_face1_{timestamp}.mp4")
+        temp_face2_path = os.path.join(output_dir, f"temp_podcast_face2_{timestamp}.mp4")
+        
+        try:
+            # Pass 1: Render Face 1 (top panel)
+            bbox1 = request.podcast_face_bboxes[0]
+            await self._render_podcast_panel(
+                input_path=request.video_path,
+                output_path=temp_face1_path,
+                face_bbox=bbox1,
+                source_width=source_w,
+                source_height=source_h,
+                target_width=panel_width,
+                target_height=panel_height,
+                start_time_ms=request.start_time_ms,
+                duration_ms=duration_ms,
+            )
+            
+            # Pass 2: Render Face 2 (bottom panel)
+            bbox2 = request.podcast_face_bboxes[1]
+            await self._render_podcast_panel(
+                input_path=request.video_path,
+                output_path=temp_face2_path,
+                face_bbox=bbox2,
+                source_width=source_w,
+                source_height=source_h,
+                target_width=panel_width,
+                target_height=panel_height,
+                start_time_ms=request.start_time_ms,
+                duration_ms=duration_ms,
+            )
+            
+            # Pass 3: Merge top/bottom with vstack and overlay captions
+            await self._vstack_podcast_with_captions(
+                top_path=temp_face1_path,
+                bottom_path=temp_face2_path,
+                output_path=request.output_path,
+                caption_path=caption_path,
+                original_video_path=request.video_path,
+                start_time_ms=request.start_time_ms,
+                duration_ms=duration_ms,
+            )
+            
+        finally:
+            for path in [temp_face1_path, temp_face2_path]:
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+
+    async def _render_podcast_panel(
+        self,
+        input_path: str,
+        output_path: str,
+        face_bbox: tuple[int, int, int, int],
+        source_width: int,
+        source_height: int,
+        target_width: int,
+        target_height: int,
+        start_time_ms: int,
+        duration_ms: int,
+    ) -> None:
+        """Render a single podcast panel (one speaker) with face-centered crop."""
+        bbox_x, bbox_y, bbox_w, bbox_h = face_bbox
+        
+        # Calculate crop centered on face with aspect ratio matching target
+        # For vstack: target is 1080x960, aspect ratio = 1.125 (wider than tall)
+        target_aspect = target_width / target_height
+        
+        # Start with face size and add generous padding (2.5x for head + shoulders)
+        padding = 2.5
+        base_size = int(max(bbox_w, bbox_h) * padding)
+        
+        # Calculate crop dimensions to match target aspect ratio
+        if target_aspect >= 1:
+            # Target is wider than tall (our case: 1080x960 = 1.125)
+            crop_height = base_size
+            crop_width = int(base_size * target_aspect)
+        else:
+            crop_width = base_size
+            crop_height = int(base_size / target_aspect)
+        
+        # Ensure minimum crop for quality (at least 400px height for faces)
+        min_height = 400
+        if crop_height < min_height:
+            scale_factor = min_height / crop_height
+            crop_height = min_height
+            crop_width = int(crop_width * scale_factor)
+        
+        # Center crop on face center
+        center_x = bbox_x + bbox_w / 2
+        center_y = bbox_y + bbox_h / 2
+        crop_x = int(center_x - crop_width / 2)
+        crop_y = int(center_y - crop_height / 2)
+        
+        # Clamp to source bounds
+        crop_x = max(0, min(crop_x, source_width - crop_width))
+        crop_y = max(0, min(crop_y, source_height - crop_height))
+        crop_width = min(crop_width, source_width)
+        crop_height = min(crop_height, source_height)
+        
+        logger.info(
+            f"Podcast panel: bbox=({bbox_x},{bbox_y},{bbox_w}x{bbox_h}), "
+            f"crop={crop_width}x{crop_height} at ({crop_x},{crop_y}) -> {target_width}x{target_height}"
+        )
+        
+        filters = [
+            f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=disable",
+            "setsar=1",
+        ]
+        
+        await self._run_ffmpeg(
+            input_path=input_path,
+            output_path=output_path,
+            start_time_ms=start_time_ms,
+            duration_ms=duration_ms,
+            video_filters=filters,
+            include_audio=False,
+        )
+
+    async def _vstack_podcast_with_captions(
+        self,
+        top_path: str,
+        bottom_path: str,
+        output_path: str,
+        caption_path: Optional[str],
+        original_video_path: str,
+        start_time_ms: int,
+        duration_ms: int,
+    ) -> None:
+        """Merge two podcast panels top/bottom and add captions + audio."""
+        # Build filter complex for vstack + captions
+        filter_complex = "[0:v][1:v]vstack=inputs=2[stacked]"
+        
+        if caption_path and os.path.isfile(caption_path):
+            escaped_caption = self._escape_filter_path(caption_path)
+            filter_complex += f";[stacked]ass={escaped_caption}[final]"
+            map_video = "[final]"
+        else:
+            map_video = "[stacked]"
+        
+        # Build FFmpeg command
+        start_seconds = start_time_ms / 1000.0
+        duration_seconds = duration_ms / 1000.0
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", top_path,
+            "-i", bottom_path,
+            "-ss", str(start_seconds),
+            "-t", str(duration_seconds),
+            "-i", original_video_path,  # For audio
+            "-filter_complex", filter_complex,
+            "-map", map_video,
+            "-map", "2:a",  # Audio from original
+            "-c:v", "libx264",
+            "-preset", self.settings.ffmpeg_preset,
+            "-crf", str(self.settings.ffmpeg_crf),
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        
+        logger.debug(f"Podcast vstack command: {' '.join(cmd)}")
+        
+        # Use run_in_executor for Windows compatibility
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True)
+        )
+        
+        if result.returncode != 0:
+            error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+            logger.error(f"Podcast vstack failed: {error_msg}")
+            raise RenderingError(f"Podcast merge failed: {error_msg[:200]}")
+
+    async def _render_static_screen_crop(
+        self,
+        input_path: str,
+        output_path: str,
+        source_width: int,
+        source_height: int,
+        target_width: int,
+        target_height: int,
+        start_time_ms: int,
+        duration_ms: int,
+    ) -> None:
+        """Render screen content with static centered 1:1 square crop."""
+        # Take a 1:1 square crop from center-top (avoid webcam in corner)
+        screen_region_height = int(source_height * 0.70)
+        square_size = min(source_width, screen_region_height)
+        
+        crop_x = (source_width - square_size) // 2
+        crop_y = 0  # Start from top
+        
+        logger.info(
+            f"Static screen crop: 1:1 square={square_size}x{square_size} at ({crop_x}, {crop_y})"
+        )
+        
+        filters = [
+            f"crop={square_size}:{square_size}:{crop_x}:{crop_y}",
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=disable",
+            "setsar=1",
+        ]
+        
+        await self._run_ffmpeg(
+            input_path=input_path,
+            output_path=output_path,
+            start_time_ms=start_time_ms,
+            duration_ms=duration_ms,
+            video_filters=filters,
+            include_audio=False,
+        )
+
+    async def _render_static_face_crop(
+        self,
+        input_path: str,
+        output_path: str,
+        source_width: int,
+        source_height: int,
+        corner_facecam_bbox: tuple[int, int, int, int],
+        target_width: int,
+        target_height: int,
+        start_time_ms: int,
+        duration_ms: int,
+        is_custom_bbox: bool = False,  # True if user-drawn in Custom mode
+    ) -> None:
+        """Render face crop from corner_facecam_bbox.
+        
+        For user-drawn custom boxes: minimal padding (1.5x) to respect selection.
+        For auto-detected boxes: larger expansion (3x) to show full head/shoulders.
+        """
+        bbox_x, bbox_y, bbox_w, bbox_h = corner_facecam_bbox
+        
+        # Target aspect ratio for bottom panel (e.g., 1080/960 = 1.125)
+        target_aspect = target_width / target_height
+        bbox_aspect = bbox_w / bbox_h if bbox_h > 0 else target_aspect
+        
+        # PADDING DECISION: Check is_custom_bbox flag FIRST, then fall back to size heuristic
+        if is_custom_bbox:
+            # User drew this box manually - use EXACT selection (no expansion)
+            padding_factor = 1.0  # No padding - respect exact user selection
+            logger.info(f"Custom-drawn bbox, using exact selection (1.0x, no padding)")
+
+        else:
+            # Auto-detected box - use size heuristic to decide padding
+            frame_area = source_width * source_height
+            bbox_area = bbox_w * bbox_h
+            bbox_area_ratio = bbox_area / frame_area if frame_area > 0 else 0
+            
+            if bbox_area_ratio < 0.05:  # Small bbox = auto-detected corner webcam
+                padding_factor = 3.0  # 3x expansion for auto-detected webcams
+                logger.info(f"Auto-detected webcam bbox ({bbox_area_ratio:.2%} of frame), using 3x expansion")
+            else:
+                # Larger auto-detected bbox
+                padding_factor = 1.5
+                logger.info(f"Large auto-detected bbox ({bbox_area_ratio:.2%} of frame), using 1.5x padding")
+
+        
+        crop_w = int(bbox_w * padding_factor)
+        crop_h = int(bbox_h * padding_factor)
+        
+        # Adjust crop to match target aspect ratio while preserving user's selection
+        if bbox_aspect > target_aspect:
+            # User's selection is wider than target - expand height to match
+            crop_h = int(crop_w / target_aspect)
+        else:
+            # User's selection is taller than target - expand width to match
+            crop_w = int(crop_h * target_aspect)
+
+        
+        # Center the crop on the user's bbox center
+        center_x = bbox_x + bbox_w / 2
+        center_y = bbox_y + bbox_h / 2
+        crop_x = int(center_x - crop_w / 2)
+        crop_y = int(center_y - crop_h / 2)
+        
+        # Clamp to source bounds
+        crop_x = max(0, min(crop_x, source_width - crop_w))
+        crop_y = max(0, min(crop_y, source_height - crop_h))
+        crop_w = min(crop_w, source_width)
+        crop_h = min(crop_h, source_height)
+        
+        logger.info(
+            f"Static face crop: bbox=({bbox_x},{bbox_y},{bbox_w}x{bbox_h}), "
+            f"crop={crop_w}x{crop_h} at ({crop_x},{crop_y}) -> {target_width}x{target_height}"
+        )
+        
+        filters = [
+            f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}",
+            f"scale={target_width}:{target_height}:force_original_aspect_ratio=disable",
+            "setsar=1",
+        ]
+        
+        await self._run_ffmpeg(
+            input_path=input_path,
+            output_path=output_path,
+            start_time_ms=start_time_ms,
+            duration_ms=duration_ms,
+            video_filters=filters,
+            include_audio=False,
+        )
 
     async def _render_embedded_facecam_mode(
         self,
@@ -524,12 +1032,12 @@ class RenderingService:
                 base_size = int(webcam_size * tight_padding)
                 logger.info(f"Using webcam-based crop: webcam={webcam_size}, base_size={base_size}")
         
-        # Minimum base_size for quality (at least 200px to avoid excessive pixelation)
-        base_size = max(base_size, 200)
+        # Minimum base_size for quality (at least 300px for better context around face)
+        base_size = max(base_size, 300)
         
-        # Maximum base_size - cap at 360px for aggressive zoom on face
-        # This ensures face truly FILLS the output
-        base_size = min(base_size, 360)
+        # Maximum base_size - cap at 500px for reasonable zoom
+        # This ensures we show some context around the face, not just extreme closeup
+        base_size = min(base_size, 500)
         
         # Calculate crop dimensions matching target aspect ratio
         # The crop should be SMALL so when scaled up, face fills the output
@@ -731,9 +1239,15 @@ class RenderingService:
         use_captions = caption_path and os.path.isfile(caption_path)
         if use_captions:
             # Stack screen and face, then overlay captions on the result
-            filter_complex = f"[0:v][1:v]vstack=inputs=2[stacked];[stacked]ass={self._escape_filter_path(caption_path)}[out]"
+            # Use fontsdir to load fonts from project's fonts/ folder
+            ass_filter = f"ass={self._escape_filter_path(caption_path)}"
+            if self.fonts_dir:
+                fonts_dir_escaped = self._escape_filter_path(self.fonts_dir)
+                ass_filter = f"ass={self._escape_filter_path(caption_path)}:fontsdir={fonts_dir_escaped}"
+            filter_complex = f"[0:v][1:v]vstack=inputs=2[stacked];[stacked]{ass_filter}[out]"
         else:
             filter_complex = "[0:v][1:v]vstack=inputs=2[out]"
+
 
         # The temp videos (screen, face) already start at 0 and have correct duration.
         # We only need to seek the original video for audio extraction.
@@ -887,8 +1401,12 @@ class RenderingService:
         caption_path: Optional[str],
         duration_ms: int,
     ) -> None:
-        """Render with static centered crop (fallback)."""
-        # Calculate centered crop
+        """Render with static crop, centered on detected face if available.
+        
+        For talking_head layouts (podcasts, interviews), detects face positions
+        from sampled frames and centers the crop on the speaker.
+        """
+        # Calculate target crop dimensions
         target_aspect = self.settings.target_output_width / self.settings.target_output_height
         
         if request.source_width / request.source_height > target_aspect:
@@ -900,8 +1418,24 @@ class RenderingService:
             crop_width = request.source_width
             crop_height = int(crop_width / target_aspect)
         
+        # Default: centered crop
         crop_x = (request.source_width - crop_width) // 2
         crop_y = (request.source_height - crop_height) // 2
+        
+        # For talking_head layout, try to detect face and center on it
+        if request.layout_type == "talking_head":
+            face_center_x = await self._detect_face_center_x(
+                request.video_path,
+                request.start_time_ms,
+                request.source_width,
+                request.source_height,
+            )
+            if face_center_x is not None:
+                # Center crop horizontally on the detected face
+                crop_x = int(face_center_x - crop_width / 2)
+                # Clamp to valid range
+                crop_x = max(0, min(crop_x, request.source_width - crop_width))
+                logger.info(f"Face-centered crop: face_x={face_center_x}, crop_x={crop_x}")
         
         # Build filter chain
         filters = [
@@ -910,7 +1444,12 @@ class RenderingService:
         ]
         
         if caption_path and os.path.isfile(caption_path):
-            filters.append(f"ass={self._escape_filter_path(caption_path)}")
+            # Add fontsdir for local fonts
+            ass_filter = f"ass={self._escape_filter_path(caption_path)}"
+            if self.fonts_dir:
+                fonts_dir_escaped = self._escape_filter_path(self.fonts_dir)
+                ass_filter = f"ass={self._escape_filter_path(caption_path)}:fontsdir={fonts_dir_escaped}"
+            filters.append(ass_filter)
         
         await self._run_ffmpeg(
             input_path=request.video_path,
@@ -919,6 +1458,71 @@ class RenderingService:
             duration_ms=duration_ms,
             video_filters=filters,
         )
+
+    async def _detect_face_center_x(
+        self,
+        video_path: str,
+        start_time_ms: int,
+        frame_width: int,
+        frame_height: int,
+    ) -> Optional[int]:
+        """Detect the horizontal center of the largest face in the video.
+        
+        Samples multiple frames to find a stable face position.
+        Returns the X coordinate of the face center, or None if no face detected.
+        """
+        try:
+            import cv2
+            
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return None
+            
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            
+            # Sample 5 frames across the clip to find faces
+            sample_offsets_ms = [0, 1000, 2000, 3000, 4000]
+            face_centers = []
+            
+            face_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            )
+            
+            for offset in sample_offsets_ms:
+                time_ms = start_time_ms + offset
+                frame_pos = int((time_ms / 1000) * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = face_cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50)
+                )
+                
+                if len(faces) > 0:
+                    # Find largest face
+                    largest_face = max(faces, key=lambda f: f[2] * f[3])
+                    x, y, w, h = largest_face
+                    face_center_x = x + w // 2
+                    face_centers.append(face_center_x)
+            
+            cap.release()
+            
+            if face_centers:
+                # Use median for stability
+                avg_center = sorted(face_centers)[len(face_centers) // 2]
+                logger.info(f"Detected face centers: {face_centers}, using median: {avg_center}")
+                return avg_center
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Face detection failed: {e}")
+            return None
+
 
     async def _render_stream_with_static_crop(
         self,
@@ -1236,9 +1840,376 @@ class RenderingService:
         # Wrap in single quotes for the filter expression
         return f"'{escaped}'"
 
+    async def _render_with_keyframes(
+        self,
+        request: RenderRequest,
+        caption_path: Optional[str],
+        duration_ms: int,
+    ) -> None:
+        """
+        Render clip with multiple layout segments based on timeline keyframes.
+        
+        Each keyframe defines a layout configuration that applies from its timestamp
+        until the next keyframe (or end of clip). Segments are rendered separately
+        then concatenated with FFmpeg.
+        """
+        keyframes = sorted(request.layout_keyframes, key=lambda k: k.timestamp_ms)
+        
+        if len(keyframes) == 0:
+            # Fallback to static rendering if no keyframes
+            await self._render_static(request, caption_path, duration_ms)
+            return
+        
+        output_dir = os.path.dirname(request.output_path)
+        timestamp = os.path.basename(request.output_path).replace(".mp4", "")
+        segment_paths: list[str] = []
+        
+        try:
+            # Render each segment between keyframes
+            for i, keyframe in enumerate(keyframes):
+                # Calculate segment time range (relative to clip start)
+                segment_start_ms = keyframe.timestamp_ms
+                if i + 1 < len(keyframes):
+                    segment_end_ms = keyframes[i + 1].timestamp_ms
+                else:
+                    segment_end_ms = duration_ms
+                
+                # Skip empty segments
+                segment_duration = segment_end_ms - segment_start_ms
+                if segment_duration <= 0:
+                    continue
+                
+                # Create segment output path
+                segment_path = os.path.join(
+                    output_dir, 
+                    f"temp_segment_{timestamp}_{i}.mp4"
+                )
+                segment_paths.append(segment_path)
+                
+                logger.info(
+                    f"Rendering keyframe segment {i+1}/{len(keyframes)}: "
+                    f"{segment_start_ms}ms-{segment_end_ms}ms, layout={keyframe.layout_type}"
+                )
+                
+                # Render this segment with the keyframe's layout configuration
+                await self._render_keyframe_segment(
+                    request=request,
+                    segment_path=segment_path,
+                    segment_start_ms=segment_start_ms,
+                    segment_end_ms=segment_end_ms,
+                    keyframe=keyframe,
+                )
+            
+            if len(segment_paths) == 0:
+                raise RenderingError("No segments were rendered")
+            
+            if len(segment_paths) == 1:
+                # Single segment - just move it to output
+                shutil.move(segment_paths[0], request.output_path)
+                segment_paths.clear()
+            else:
+                # Multiple segments - concatenate them
+                await self._concat_segments(
+                    segment_paths=segment_paths,
+                    output_path=request.output_path,
+                    caption_path=caption_path,
+                    audio_source_path=request.video_path,
+                    audio_start_ms=request.start_time_ms,
+                    audio_duration_ms=duration_ms,
+                )
+        
+        finally:
+            # Cleanup temp segment files
+            for path in segment_paths:
+                if os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+    
+    async def _render_keyframe_segment(
+        self,
+        request: RenderRequest,
+        segment_path: str,
+        segment_start_ms: int,
+        segment_end_ms: int,
+        keyframe: LayoutKeyframe,
+    ) -> None:
+        """
+        Render a single segment with the keyframe's layout configuration.
+        
+        Creates a temporary RenderRequest for this segment and routes to the
+        appropriate rendering method based on the keyframe's layout_type.
+        """
+        segment_duration = segment_end_ms - segment_start_ms
+        
+        # Get actual video dimensions
+        source_w, source_h = await self._get_video_dimensions(request.video_path)
+        if source_w == 0 or source_h == 0:
+            source_w = request.source_width
+            source_h = request.source_height
+        
+        # Calculate region heights for split layout
+        total_height = self.settings.target_output_height
+        screen_height = int(total_height * self.settings.split_screen_ratio)
+        face_height = total_height - screen_height
+        
+        # Absolute timestamps in the source video
+        abs_start_ms = request.start_time_ms + segment_start_ms
+        abs_end_ms = request.start_time_ms + segment_end_ms
+        
+        if keyframe.layout_type == "screen_share" and keyframe.face_bbox:
+            # Split screen with provided facecam bbox
+            output_dir = os.path.dirname(segment_path)
+            basename = os.path.basename(segment_path).replace(".mp4", "")
+            temp_screen_path = os.path.join(output_dir, f"temp_screen_{basename}.mp4")
+            temp_face_path = os.path.join(output_dir, f"temp_face_{basename}.mp4")
+            
+            try:
+                # Render screen content (top half)
+                await self._render_static_screen_crop(
+                    input_path=request.video_path,
+                    output_path=temp_screen_path,
+                    source_width=source_w,
+                    source_height=source_h,
+                    target_width=self.settings.target_output_width,
+                    target_height=screen_height,
+                    start_time_ms=abs_start_ms,
+                    duration_ms=segment_duration,
+                )
+                
+                # Render face crop (bottom half)
+                await self._render_static_face_crop(
+                    input_path=request.video_path,
+                    output_path=temp_face_path,
+                    source_width=source_w,
+                    source_height=source_h,
+                    corner_facecam_bbox=keyframe.face_bbox,
+                    target_width=self.settings.target_output_width,
+                    target_height=face_height,
+                    start_time_ms=abs_start_ms,
+                    duration_ms=segment_duration,
+                    is_custom_bbox=True,  # User-defined keyframe boxes
+                )
+                
+                # Stack them vertically (no audio yet - added during concat)
+                await self._vstack_segments_no_audio(
+                    top_path=temp_screen_path,
+                    bottom_path=temp_face_path,
+                    output_path=segment_path,
+                )
+            finally:
+                for path in [temp_screen_path, temp_face_path]:
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+        
+        elif keyframe.layout_type == "podcast" and keyframe.podcast_bboxes and len(keyframe.podcast_bboxes) >= 2:
+            # Podcast mode with 2 speaker boxes
+            panel_width = self.settings.target_output_width
+            panel_height = self.settings.target_output_height // 2
+            
+            output_dir = os.path.dirname(segment_path)
+            basename = os.path.basename(segment_path).replace(".mp4", "")
+            temp_face1_path = os.path.join(output_dir, f"temp_podcast_face1_{basename}.mp4")
+            temp_face2_path = os.path.join(output_dir, f"temp_podcast_face2_{basename}.mp4")
+            
+            try:
+                # Render Face 1 (top panel)
+                await self._render_podcast_panel(
+                    input_path=request.video_path,
+                    output_path=temp_face1_path,
+                    face_bbox=keyframe.podcast_bboxes[0],
+                    source_width=source_w,
+                    source_height=source_h,
+                    target_width=panel_width,
+                    target_height=panel_height,
+                    start_time_ms=abs_start_ms,
+                    duration_ms=segment_duration,
+                )
+                
+                # Render Face 2 (bottom panel)
+                await self._render_podcast_panel(
+                    input_path=request.video_path,
+                    output_path=temp_face2_path,
+                    face_bbox=keyframe.podcast_bboxes[1],
+                    source_width=source_w,
+                    source_height=source_h,
+                    target_width=panel_width,
+                    target_height=panel_height,
+                    start_time_ms=abs_start_ms,
+                    duration_ms=segment_duration,
+                )
+                
+                # Stack them vertically (no audio yet)
+                await self._vstack_segments_no_audio(
+                    top_path=temp_face1_path,
+                    bottom_path=temp_face2_path,
+                    output_path=segment_path,
+                )
+            finally:
+                for path in [temp_face1_path, temp_face2_path]:
+                    if os.path.isfile(path):
+                        try:
+                            os.remove(path)
+                        except Exception:
+                            pass
+        
+        else:
+            # talking_head or fallback - simple centered crop
+            # Calculate 9:16 crop dimensions
+            target_aspect = self.settings.target_output_width / self.settings.target_output_height
+            
+            if source_w / source_h > target_aspect:
+                # Source is wider - crop width
+                crop_h = source_h
+                crop_w = int(source_h * target_aspect)
+            else:
+                # Source is taller - crop height
+                crop_w = source_w
+                crop_h = int(source_w / target_aspect)
+            
+            # Center the crop, optionally offset by face_bbox if provided
+            center_x = source_w // 2
+            center_y = source_h // 2
+            
+            if keyframe.face_bbox:
+                # Use face bbox center as crop center
+                fx, fy, fw, fh = keyframe.face_bbox
+                center_x = fx + fw // 2
+                center_y = fy + fh // 2
+            
+            crop_x = max(0, min(center_x - crop_w // 2, source_w - crop_w))
+            crop_y = max(0, min(center_y - crop_h // 2, source_h - crop_h))
+            
+            filters = [
+                f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}",
+                f"scale={self.settings.target_output_width}:{self.settings.target_output_height}:force_original_aspect_ratio=disable",
+                "setsar=1",
+            ]
+            
+            await self._run_ffmpeg(
+                input_path=request.video_path,
+                output_path=segment_path,
+                start_time_ms=abs_start_ms,
+                duration_ms=segment_duration,
+                video_filters=filters,
+                include_audio=False,
+            )
+    
+    async def _vstack_segments_no_audio(
+        self,
+        top_path: str,
+        bottom_path: str,
+        output_path: str,
+    ) -> None:
+        """Vertically stack two video segments without audio."""
+        filter_complex = "[0:v][1:v]vstack=inputs=2[v]"
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", top_path,
+            "-i", bottom_path,
+            "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-c:v", "libx264",
+            "-preset", self.settings.ffmpeg_preset,
+            "-crf", str(self.settings.ffmpeg_crf),
+            "-an",  # No audio
+            output_path,
+        ]
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True)
+        )
+        
+        if result.returncode != 0:
+            error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+            logger.error(f"vstack failed: {error_msg}")
+            raise RenderingError(f"vstack failed: {error_msg[:200]}")
+    
+    async def _concat_segments(
+        self,
+        segment_paths: list[str],
+        output_path: str,
+        caption_path: Optional[str],
+        audio_source_path: str,
+        audio_start_ms: int,
+        audio_duration_ms: int,
+    ) -> None:
+        """
+        Concatenate multiple video segments and add audio + captions.
+        
+        Uses FFmpeg concat filter to join segments, then overlays the original
+        audio track and optional captions.
+        """
+        if len(segment_paths) == 0:
+            raise RenderingError("No segments to concatenate")
+        
+        # Build input args and filter complex
+        input_args = []
+        for path in segment_paths:
+            input_args.extend(["-i", path])
+        
+        # Add audio source
+        audio_start_sec = audio_start_ms / 1000.0
+        audio_duration_sec = audio_duration_ms / 1000.0
+        input_args.extend([
+            "-ss", str(audio_start_sec),
+            "-t", str(audio_duration_sec),
+            "-i", audio_source_path,
+        ])
+        
+        # Build concat filter
+        n_segments = len(segment_paths)
+        filter_inputs = "".join(f"[{i}:v]" for i in range(n_segments))
+        filter_complex = f"{filter_inputs}concat=n={n_segments}:v=1:a=0[concat_v]"
+        
+        # Add captions if available
+        if caption_path and os.path.isfile(caption_path):
+            escaped_caption = self._escape_filter_path(caption_path)
+            filter_complex += f";[concat_v]ass={escaped_caption}[final]"
+            map_video = "[final]"
+        else:
+            map_video = "[concat_v]"
+        
+        # Audio is the last input
+        audio_input_idx = n_segments
+        
+        cmd = [
+            "ffmpeg", "-y",
+            *input_args,
+            "-filter_complex", filter_complex,
+            "-map", map_video,
+            "-map", f"{audio_input_idx}:a",
+            "-c:v", "libx264",
+            "-preset", self.settings.ffmpeg_preset,
+            "-crf", str(self.settings.ffmpeg_crf),
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        
+        logger.debug(f"Concat command: {' '.join(cmd)}")
+        
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True)
+        )
+        
+        if result.returncode != 0:
+            error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+            logger.error(f"Concat failed: {error_msg}")
+            raise RenderingError(f"Segment concatenation failed: {error_msg[:200]}")
+
 
 class RenderingError(Exception):
     """Exception raised when rendering fails."""
     pass
-
 

@@ -275,20 +275,34 @@ class TranscriptionService:
     def __init__(self):
         self.settings = get_settings()
         self._groq_client = None
+        self._local_model = None
         self._init_client()
 
     def _init_client(self):
-        """Initialize Groq client."""
-        if not self.settings.groq_api_key:
-            logger.warning("GROQ_API_KEY not set, transcription will fail")
-            return
-        
-        try:
-            from groq import Groq
-            self._groq_client = Groq(api_key=self.settings.groq_api_key)
-            logger.info("Groq client initialized for transcription")
-        except ImportError:
-            logger.error("groq package not installed. Run: pip install groq")
+        """Initialize Groq client or local model."""
+        if self.settings.groq_api_key:
+            try:
+                from groq import Groq
+                self._groq_client = Groq(api_key=self.settings.groq_api_key)
+                logger.info("Groq client initialized for transcription")
+            except ImportError:
+                logger.warning("groq package not installed. Falling back to local Whisper if needed.")
+        else:
+            logger.info("GROQ_API_KEY not set. Using local Whisper by default.")
+
+    def _get_local_model(self):
+        """Lazy load the local faster-whisper model."""
+        if self._local_model is None:
+            try:
+                from faster_whisper import WhisperModel
+                model_size = os.getenv("WHISPER_MODEL", "tiny") # use tiny for speed
+                logger.info(f"Loading local Whisper model: {model_size}...")
+                self._local_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                logger.info("Local Whisper model loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load local Whisper model: {e}")
+                raise TranscriptionError(f"Local Whisper initialization failed: {e}")
+        return self._local_model
 
     async def transcribe(
         self,
@@ -296,6 +310,7 @@ class TranscriptionService:
         work_dir: str,
         language: Optional[str] = None,
         translate_to_english: bool = False,
+        use_local: bool = False,
     ) -> TranscriptionResult:
         """
         Transcribe a video file by extracting audio first.
@@ -321,6 +336,7 @@ class TranscriptionService:
                 audio_path=audio_path,
                 language=language,
                 translate_to_english=translate_to_english,
+                use_local=use_local,
             )
         finally:
             # Cleanup extracted audio
@@ -367,6 +383,7 @@ class TranscriptionService:
         audio_path: str,
         language: Optional[str] = None,
         translate_to_english: bool = False,
+        use_local: bool = False,
     ) -> TranscriptionResult:
         """
         Transcribe an audio file.
@@ -375,6 +392,7 @@ class TranscriptionService:
             audio_path: Path to audio file (MP3, WAV, etc.)
             language: Optional language code (auto-detected if not specified)
             translate_to_english: Whether to translate to English
+            use_local: Force use of local faster-whisper
             
         Returns:
             TranscriptionResult with segments and word-level timing
@@ -382,6 +400,9 @@ class TranscriptionService:
         if not os.path.isfile(audio_path):
             raise TranscriptionError(f"Audio file not found: {audio_path}")
         
+        if use_local or not self._groq_client:
+            return await self._transcribe_local(audio_path, language)
+
         # Get audio duration to decide if we need chunking
         duration_seconds = await self._get_audio_duration(audio_path)
         
@@ -408,6 +429,52 @@ class TranscriptionService:
                 language=language,
                 translate_to_english=translate_to_english,
             )
+
+    async def _transcribe_local(self, audio_path: str, language: Optional[str] = None) -> TranscriptionResult:
+        """Transcribe using local faster-whisper."""
+        model = self._get_local_model()
+        
+        logger.info(f"Starting local transcription for: {audio_path}")
+        
+        # Run in executor to not block async loop
+        def _sync_local_transcribe():
+            segments, info = model.transcribe(audio_path, beam_size=5, word_timestamps=True, language=language)
+            
+            all_segments = []
+            full_text = ""
+            for segment in segments:
+                full_text += segment.text + " "
+                
+                transcript_words = []
+                if segment.words:
+                    for word in segment.words:
+                        transcript_words.append(TranscriptWord(
+                            word=word.word.strip(),
+                            start_time_ms=int(word.start * 1000),
+                            end_time_ms=int(word.end * 1000),
+                        ))
+                
+                all_segments.append(TranscriptSegment(
+                    start_time_ms=int(segment.start * 1000),
+                    end_time_ms=int(segment.end * 1000),
+                    text=segment.text.strip(),
+                    words=transcript_words
+                ))
+            return all_segments, full_text.strip(), info
+
+        loop = asyncio.get_event_loop()
+        segments, full_text, info = await loop.run_in_executor(None, _sync_local_transcribe)
+        
+        logger.info(f"Local transcription complete: {len(segments)} segments")
+        
+        return TranscriptionResult(
+            segments=segments,
+            full_text=full_text,
+            language=info.language,
+            duration_seconds=info.duration,
+            provider="local",
+            model=os.getenv("WHISPER_MODEL", "tiny")
+        )
 
     async def _transcribe_single(
         self,
