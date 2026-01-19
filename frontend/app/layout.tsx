@@ -28,7 +28,7 @@ export default function RootLayout({
 }>) {
     return (
         <html lang="en" className="dark">
-            <body className={`${inter.variable} antialiased`}>
+            <body className={`${inter.variable} antialiased`} suppressHydrationWarning>
                 {/* Development Notice Banner */}
                 <div className="relative z-[110] bg-gradient-to-r from-amber-500 via-orange-600 to-amber-500 text-white text-center py-2.5 px-4 text-xs font-bold uppercase tracking-widest shadow-2xl border-b border-white/10">
                     <span className="inline-flex items-center gap-2">

@@ -325,9 +325,80 @@ export function VisualEditor({ isOpen, onClose, videoUrl, onApply }: VisualEdito
     };
 
     const handleMouseUp = () => {
+        // If a keyframe is selected and we were dragging, update that keyframe's bboxes
+        if (dragging && selectedKeyframeIndex !== null) {
+            updateSelectedKeyframeBboxes();
+        }
         setDragging(null);
         setDragStart(null);
         setResizeMode("none");
+    };
+
+    // Update the selected keyframe with current face positions
+    const updateSelectedKeyframeBboxes = () => {
+        if (selectedKeyframeIndex === null) return;
+
+        const selectedFaces = faces.filter(f => f.isSelected);
+
+        setKeyframes(prev => prev.map((kf, idx) => {
+            if (idx !== selectedKeyframeIndex) return kf;
+
+            return {
+                ...kf,
+                faceBbox: selectedFaces.length === 1 ? {
+                    x: selectedFaces[0].bbox.x / 100,
+                    y: selectedFaces[0].bbox.y / 100,
+                    width: selectedFaces[0].bbox.width / 100,
+                    height: selectedFaces[0].bbox.height / 100,
+                } : kf.faceBbox,
+                podcastBboxes: selectedFaces.length >= 2 ? selectedFaces.slice(0, 2).map(f => ({
+                    x: f.bbox.x / 100,
+                    y: f.bbox.y / 100,
+                    width: f.bbox.width / 100,
+                    height: f.bbox.height / 100,
+                })) : kf.podcastBboxes,
+            };
+        }));
+    };
+
+    // Restore face positions from a keyframe
+    const restoreFacesFromKeyframe = (keyframe: LayoutKeyframe) => {
+        if (keyframe.podcastBboxes && keyframe.podcastBboxes.length >= 2) {
+            // Podcast mode - restore both speakers
+            setFaces(prev => prev.map((f, idx) => {
+                if (idx < keyframe.podcastBboxes!.length) {
+                    const bbox = keyframe.podcastBboxes![idx];
+                    return {
+                        ...f,
+                        isSelected: true,
+                        bbox: {
+                            x: bbox.x * 100,
+                            y: bbox.y * 100,
+                            width: bbox.width * 100,
+                            height: bbox.height * 100,
+                        }
+                    };
+                }
+                return { ...f, isSelected: false };
+            }));
+        } else if (keyframe.faceBbox) {
+            // Single face mode - restore first speaker, deselect second
+            setFaces(prev => prev.map((f, idx) => {
+                if (idx === 0) {
+                    return {
+                        ...f,
+                        isSelected: true,
+                        bbox: {
+                            x: keyframe.faceBbox!.x * 100,
+                            y: keyframe.faceBbox!.y * 100,
+                            width: keyframe.faceBbox!.width * 100,
+                            height: keyframe.faceBbox!.height * 100,
+                        }
+                    };
+                }
+                return { ...f, isSelected: false };
+            }));
+        }
     };
 
     // Handle apply
@@ -615,13 +686,16 @@ export function VisualEditor({ isOpen, onClose, videoUrl, onApply }: VisualEdito
                                         key={idx}
                                         onClick={() => {
                                             setSelectedKeyframeIndex(idx);
+                                            // Seek to keyframe time
                                             if (videoRef.current) {
                                                 videoRef.current.currentTime = kf.timestampMs / 1000;
                                             }
+                                            // Restore face positions from this keyframe
+                                            restoreFacesFromKeyframe(kf);
                                         }}
                                         className={`flex items-center gap-2 p-2 rounded-lg border cursor-pointer transition-all ${selectedKeyframeIndex === idx
-                                                ? "bg-purple-600/30 border-purple-500"
-                                                : "bg-white/5 border-white/10 hover:bg-white/10"
+                                            ? "bg-purple-600/30 border-purple-500"
+                                            : "bg-white/5 border-white/10 hover:bg-white/10"
                                             }`}
                                     >
                                         <Clock className="w-3 h-3 text-purple-400 flex-shrink-0" />
@@ -649,9 +723,27 @@ export function VisualEditor({ isOpen, onClose, videoUrl, onApply }: VisualEdito
                             </div>
                         )}
 
-                        {keyframes.length > 0 && (
+                        {/* Selected keyframe editing notice */}
+                        {selectedKeyframeIndex !== null && (
+                            <div className="mt-2 p-2 bg-purple-600/20 border border-purple-500/30 rounded-lg">
+                                <p className="text-[10px] text-purple-300 font-medium">
+                                    ✏️ Editing keyframe at {formatKeyframeTime(keyframes[selectedKeyframeIndex]?.timestampMs || 0)}
+                                </p>
+                                <p className="text-[9px] text-white/40 mt-1">
+                                    Move the boxes to adjust this keyframe's layout. Changes are saved automatically.
+                                </p>
+                                <button
+                                    onClick={() => setSelectedKeyframeIndex(null)}
+                                    className="mt-2 w-full px-2 py-1 bg-white/10 hover:bg-white/20 text-[10px] text-white/70 rounded transition-colors"
+                                >
+                                    Done Editing
+                                </button>
+                            </div>
+                        )}
+
+                        {keyframes.length > 0 && selectedKeyframeIndex === null && (
                             <p className="text-[9px] text-white/30 mt-2">
-                                Click keyframe to seek. Each keyframe defines layout until next keyframe.
+                                Click keyframe to edit its layout. Each keyframe defines layout until next keyframe.
                             </p>
                         )}
                     </div>

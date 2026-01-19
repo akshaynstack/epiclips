@@ -2189,8 +2189,10 @@ class RenderingService:
             "-c:v", "libx264",
             "-preset", self.settings.ffmpeg_preset,
             "-crf", str(self.settings.ffmpeg_crf),
+            "-vsync", "cfr",  # Constant frame rate for audio sync
             "-c:a", "aac",
             "-b:a", "128k",
+            "-shortest",  # Trim to shorter of audio/video to prevent drift
             "-movflags", "+faststart",
             output_path,
         ]

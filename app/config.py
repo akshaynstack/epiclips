@@ -27,6 +27,7 @@ class CaptionStyle:
     alignment: Literal["left", "center", "right"] = "center"
     bold: bool = True
     uppercase: bool = True
+    enable_emojis: bool = True  # Add emojis based on keywords (OpusClip style)
 
 
 # ============================================================

@@ -4,6 +4,7 @@ Caption Generator Service - Generates viral-style ASS subtitles with word-by-wor
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -11,6 +12,118 @@ from app.config import CaptionStyle, get_settings
 from app.services.transcription_service import TranscriptSegment, TranscriptWord
 
 logger = logging.getLogger(__name__)
+
+
+# Keyword to emoji mapping for viral captions (OpusClip style)
+# Each key maps to a list of possible emojis (first one is used)
+EMOJI_MAP = {
+    # Emotions & Reactions
+    "amazing": "🔥", "awesome": "🔥", "incredible": "🔥", "insane": "🔥",
+    "crazy": "🤯", "mind": "🤯", "blowing": "🤯", "blown": "🤯",
+    "love": "❤️", "loved": "❤️", "loving": "❤️", "heart": "❤️",
+    "happy": "😊", "happiness": "😊", "joy": "😊", "joyful": "😊",
+    "sad": "😢", "crying": "😢", "tears": "😢",
+    "laugh": "😂", "laughing": "😂", "funny": "😂", "hilarious": "😂", "lol": "😂",
+    "wow": "😮", "whoa": "😮", "woah": "😮",
+    "surprised": "😲", "shocking": "😲", "shocked": "😲",
+    "angry": "😠", "mad": "😠", "furious": "😠",
+    "scared": "😨", "fear": "😨", "afraid": "😨", "terrified": "😨",
+    "cool": "😎", "awesome": "😎", "sick": "😎",
+    "fire": "🔥", "hot": "🔥", "lit": "🔥", "flames": "🔥",
+    "perfect": "💯", "hundred": "💯", "exactly": "💯",
+    
+    # Actions
+    "think": "🤔", "thinking": "🤔", "wonder": "🤔", "wondering": "🤔",
+    "idea": "💡", "ideas": "💡", "lightbulb": "💡", "eureka": "💡",
+    "work": "💪", "working": "💪", "strong": "💪", "strength": "💪", "powerful": "💪",
+    "win": "🏆", "winning": "🏆", "won": "🏆", "winner": "🏆", "champion": "🏆",
+    "success": "🎯", "successful": "🎯", "goal": "🎯", "target": "🎯",
+    "grow": "📈", "growing": "📈", "growth": "📈", "increase": "📈", "increasing": "📈",
+    "drop": "📉", "dropping": "📉", "decrease": "📉", "falling": "📉",
+    "run": "🏃", "running": "🏃", "fast": "🏃", "speed": "🏃",
+    "stop": "🛑", "stopped": "🛑", "halt": "🛑",
+    "start": "🚀", "started": "🚀", "launch": "🚀", "launching": "🚀", "begin": "🚀",
+    "explode": "💥", "explosion": "💥", "boom": "💥", "bang": "💥",
+    
+    # Money & Business
+    "money": "💰", "cash": "💰", "rich": "💰", "wealth": "💰", "wealthy": "💰",
+    "dollar": "💵", "dollars": "💵", "buck": "💵", "bucks": "💵",
+    "profit": "💸", "profits": "💸", "revenue": "💸", "income": "💸",
+    "invest": "📊", "investing": "📊", "investment": "📊", "stock": "📊", "stocks": "📊",
+    "business": "💼", "company": "💼", "corporate": "💼", "enterprise": "💼",
+    "million": "🤑", "billion": "🤑", "thousand": "🤑",
+    "free": "🆓", "freebie": "🆓",
+    "sale": "🏷️", "discount": "🏷️", "deal": "🏷️",
+    
+    # Tech & Digital
+    "ai": "🤖", "robot": "🤖", "artificial": "🤖", "intelligence": "🤖",
+    "computer": "💻", "laptop": "💻", "code": "💻", "coding": "💻", "programming": "💻",
+    "phone": "📱", "mobile": "📱", "smartphone": "📱", "app": "📱",
+    "internet": "🌐", "web": "🌐", "website": "🌐", "online": "🌐",
+    "email": "📧", "mail": "📧",
+    "video": "🎬", "videos": "🎬", "film": "🎬", "movie": "🎬",
+    "music": "🎵", "song": "🎵", "songs": "🎵", "audio": "🎵",
+    "game": "🎮", "games": "🎮", "gaming": "🎮", "gamer": "🎮",
+    
+    # Objects & Items
+    "book": "📚", "books": "📚", "read": "📚", "reading": "📚",
+    "house": "🏠", "home": "🏠",
+    "car": "🚗", "cars": "🚗", "driving": "🚗", "drive": "🚗",
+    "food": "🍕", "eat": "🍕", "eating": "🍕", "hungry": "🍕",
+    "coffee": "☕", "tea": "☕",
+    "water": "💧", "drink": "💧", "drinking": "💧",
+    "gift": "🎁", "present": "🎁", "gifts": "🎁",
+    "key": "🔑", "keys": "🔑", "unlock": "🔑", "secret": "🔑",
+    
+    # People & Communication
+    "people": "👥", "team": "👥", "group": "👥", "community": "👥",
+    "friend": "🤝", "friends": "🤝", "partnership": "🤝", "partner": "🤝",
+    "king": "👑", "queen": "👑", "royal": "👑", "best": "👑",
+    "star": "⭐", "stars": "⭐", "celebrity": "⭐", "famous": "⭐",
+    "eyes": "👀", "look": "👀", "looking": "👀", "watch": "👀", "see": "👀",
+    "point": "👉", "pointing": "👉", "this": "👉", "here": "👉",
+    "clap": "👏", "applause": "👏", "bravo": "👏",
+    
+    # Time & Status
+    "new": "✨", "fresh": "✨", "brand": "✨", "shiny": "✨",
+    "old": "📜", "ancient": "📜", "history": "📜", "historical": "📜",
+    "time": "⏰", "clock": "⏰", "hour": "⏰", "minute": "⏰", "second": "⏰",
+    "wait": "⏳", "waiting": "⏳", "loading": "⏳",
+    "quick": "⚡", "quickly": "⚡", "fast": "⚡", "instant": "⚡", "immediately": "⚡",
+    "warning": "⚠️", "caution": "⚠️", "careful": "⚠️", "danger": "⚠️",
+    "check": "✅", "correct": "✅", "right": "✅", "yes": "✅", "done": "✅",
+    "wrong": "❌", "no": "❌", "never": "❌", "false": "❌",
+    "question": "❓", "why": "❓", "how": "❓", "what": "❓",
+    
+    # Misc Viral
+    "subscribe": "🔔", "notification": "🔔", "bell": "🔔",
+    "like": "👍", "liked": "👍", "thumbs": "👍",
+    "share": "📤", "sharing": "📤", "shared": "📤",
+    "comment": "💬", "comments": "💬", "feedback": "💬",
+    "learn": "📝", "learning": "📝", "study": "📝", "lesson": "📝",
+    "tip": "💡", "tips": "💡", "trick": "💡", "tricks": "💡", "hack": "💡", "hacks": "💡",
+    "number": "🔢", "numbers": "🔢", "stats": "🔢", "statistics": "🔢",
+    "world": "🌍", "global": "🌍", "earth": "🌍", "worldwide": "🌍",
+    "true": "✓", "truth": "✓", "fact": "✓", "facts": "✓", "real": "✓",
+}
+
+# Words to skip (common words that shouldn't get emojis even if matched)
+EMOJI_SKIP_WORDS = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+                    "have", "has", "had", "do", "does", "did", "will", "would", "could", 
+                    "should", "may", "might", "must", "shall", "can", "need", "dare",
+                    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+                    "i", "me", "my", "we", "our", "you", "your", "he", "him", "his",
+                    "she", "her", "it", "its", "they", "them", "their"}
+
+
+def get_emoji_for_word(word: str) -> Optional[str]:
+    """Get an emoji for a word if one matches. Returns None if no match."""
+    clean_word = re.sub(r'[^\w]', '', word.lower())  # Remove punctuation
+    
+    if clean_word in EMOJI_SKIP_WORDS:
+        return None
+    
+    return EMOJI_MAP.get(clean_word)
 
 
 # Vertical positions in ASS format
@@ -47,6 +160,7 @@ class CaptionGeneratorService:
     
     Features:
     - Word-by-word highlighting (gold highlight on current word)
+    - Automatic emoji insertion based on keywords
     - Configurable styling (font, color, position)
     - Support for transcript segments and word-level timing
     - Modern viral caption aesthetic
@@ -257,7 +371,7 @@ Style: Highlight,{style.font_name},{style.font_size},{highlight_color},{primary_
         clip_start_ms: int,
         style: CaptionStyle,
     ) -> list[str]:
-        """Generate events for a word group with word-by-word highlighting."""
+        """Generate events for a word group with word-by-word highlighting and emojis."""
         events: list[str] = []
         words = group.words
 
@@ -280,7 +394,7 @@ Style: Highlight,{style.font_name},{style.font_size},{highlight_color},{primary_
             if word_end <= word_start:
                 continue
 
-            # Build display text with current word highlighted
+            # Build display text with current word highlighted and emojis
             display_parts: list[str] = []
 
             for j, word in enumerate(words):
@@ -288,11 +402,23 @@ Style: Highlight,{style.font_name},{style.font_size},{highlight_color},{primary_
                 if style.uppercase:
                     word_text = word_text.upper()
 
+                # Get emoji for this word (if enabled and matched)
+                emoji = get_emoji_for_word(word.word) if style.enable_emojis else None
+                
                 if j == i:
                     # Current word - use highlight style
-                    display_parts.append(f"{{\\rHighlight}}{word_text}{{\\rDefault}}")
+                    # Add emoji right after the highlighted word if matched
+                    if emoji:
+                        display_parts.append(f"{{\\rHighlight}}{word_text} {emoji}{{\\rDefault}}")
+                    else:
+                        display_parts.append(f"{{\\rHighlight}}{word_text}{{\\rDefault}}")
                 else:
-                    display_parts.append(word_text)
+                    # Not the current word - show without highlight
+                    # Only show emoji if this word was already highlighted (passed)
+                    if emoji and j < i:
+                        display_parts.append(f"{word_text} {emoji}")
+                    else:
+                        display_parts.append(word_text)
 
             # Wrap into lines
             lines = self._wrap_words(display_parts, style.max_words_per_line)

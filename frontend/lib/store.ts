@@ -282,8 +282,22 @@ export const useAppStore = create<AppState>((set, get) => ({
                     renderFormData.append("podcast_speaker_boxes", JSON.stringify(layoutData.podcast_speaker_boxes));
                 }
 
-                // Pass timeline keyframes if configured (Advanced Custom Mode)
-                if (layoutOptions.keyframes && layoutOptions.keyframes.length > 0) {
+                // Timeline keyframes - only apply if:
+                // 1. We're in custom mode (no AI planning)
+                // 2. OR keyframes are explicitly set for single-clip mode
+                // 
+                // For AI-planned multi-clip workflows, keyframes don't make sense because:
+                // - Keyframes are set based on the full video preview (0:00-26:48)
+                // - AI clips are from different parts (e.g., 101s-123s, 167s-192s)
+                // - Keyframes at 0ms/6281ms are nonsensical for clip starting at 101s
+                //
+                // TODO: In the future, support per-clip keyframe editing
+                const shouldUseKeyframes =
+                    layoutOptions.keyframes &&
+                    layoutOptions.keyframes.length > 0 &&
+                    planData.clips.length === 1;  // Only for single-clip mode
+
+                if (shouldUseKeyframes) {
                     renderFormData.append("layout_keyframes", JSON.stringify(layoutOptions.keyframes));
                     addLog(`⏱️ Using ${layoutOptions.keyframes.length} timeline keyframe(s)`);
                 }
