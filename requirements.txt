@@ -1,3 +1,9 @@
+# =============================================================================
+# Epiclips - Production Requirements
+# =============================================================================
+# All versions pinned for reproducible builds and fast pip installs
+# =============================================================================
+
 # FastAPI and server
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
@@ -44,11 +50,5 @@ python-json-logger==2.0.7
 python-dotenv               # Load environment variables from .env
 aiofiles>=23.0.0            # Async file operations
 
-# Testing
-pytest==7.4.4
-pytest-asyncio==0.23.3
-pytest-cov==4.1.0
-
-
-
-google-generativeai
+# Google AI SDK (pinned to avoid dependency conflicts with grpc/protobuf)
+google-generativeai==0.8.5

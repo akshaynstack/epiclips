@@ -1,0 +1,142 @@
+# =============================================================================
+# Epiclips Backend - Docker Ignore
+# =============================================================================
+# This file prevents unnecessary files from being sent to the Docker build
+# context, significantly speeding up builds and improving cache efficiency.
+# =============================================================================
+
+# =============================================================================
+# Git
+# =============================================================================
+.git
+.gitignore
+.gitattributes
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env.local
+.env.*.local
+
+# Testing & Coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.hypothesis/
+.cache/
+coverage.xml
+*.cover
+nosetests.xml
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Build artifacts
+build/
+dist/
+develop-eggs/
+downloads/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+
+# =============================================================================
+# Frontend (built separately with its own Dockerfile)
+# =============================================================================
+frontend/
+
+# =============================================================================
+# Documentation & Examples
+# =============================================================================
+docs/
+examples/
+*.md
+!requirements.txt
+LICENSE
+CONTRIBUTING.md
+
+# =============================================================================
+# IDE & Editor
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# =============================================================================
+# OS Files
+# =============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Logs & Temp Files
+# =============================================================================
+*.log
+logs/
+*.tmp
+*.temp
+/tmp/
+
+# =============================================================================
+# Output & Cache (runtime generated)
+# =============================================================================
+output/
+test_clips/
+video_cache/
+scripts/
+
+# =============================================================================
+# Models (downloaded at runtime or too large)
+# =============================================================================
+models/*.pt
+models/*.onnx
+models/*.pth
+*.weights
+
+# =============================================================================
+# Docker (prevent recursive inclusion)
+# =============================================================================
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# =============================================================================
+# Tests (not needed in production image)
+# =============================================================================
+tests/
+*_test.py
+test_*.py
+conftest.py
+pytest.ini
+setup.cfg
+pyproject.toml
+uv.lock

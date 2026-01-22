@@ -1,83 +1,75 @@
 # =============================================================================
-# Epiclips - Multi-stage Dockerfile
+# Epiclips - Multi-stage Dockerfile (Optimized)
 # =============================================================================
-# Stage 1: Build stage - Install dependencies
-# Stage 2: Runtime stage - Minimal image for production
-#
-# Epiclips is an open-source AI video clipping engine, providing:
-# - Video detection (MediaPipe, DeepSORT)
-# - Full AI clipping pipeline (transcription, intelligence, rendering)
+# Optimizations:
+# - Uses 'uv' for 10-100x faster pip installs
+# - Better layer ordering for cache efficiency
+# - Combines RUN commands where possible
+# - Excludes test dependencies from production image
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Stage 1: Builder
+# Stage 1: Builder - Install Python dependencies with uv (FAST)
 # -----------------------------------------------------------------------------
 FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+# Install uv (extremely fast Python package installer)
+# https://github.com/astral-sh/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Create virtual environment - this ensures pip sees already-installed packages
-# when resolving dependencies (unlike --prefix which causes path discovery issues)
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Create virtual environment
+RUN uv venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    VIRTUAL_ENV="/opt/venv"
 
-# Copy requirements and install Python dependencies
+# Copy only requirements first (cache layer if code changes but deps don't)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+
+# Install Python dependencies with uv (10-100x faster than pip)
+RUN uv pip install --no-cache -r requirements.txt
 
 # -----------------------------------------------------------------------------
-# Stage 2: Runtime
+# Stage 2: Runtime - Minimal production image
 # -----------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
 # Labels
-LABEL maintainer="akshaynstack"
-LABEL description="Epiclips - Open-source AI-powered video clipping"
-LABEL version="1.0.0"
+LABEL maintainer="akshaynstack" \
+      description="Epiclips - Open-source AI-powered video clipping" \
+      version="1.0.0"
 
 # Environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
-    # Virtual environment (copied from builder)
     VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:$PATH" \
-    # App config
     APP_HOME=/app \
     TEMP_DIRECTORY=/tmp/genesis \
-    # Disable MediaPipe GPU (use CPU)
     MEDIAPIPE_DISABLE_GPU=1 \
-    # yt-dlp config
     YTDLP_NO_UPDATE=1 \
-    # Parallel processing defaults
     MAX_WORKERS=4 \
     MAX_RENDER_WORKERS=3
 
 WORKDIR $APP_HOME
 
-# Install runtime dependencies
+# Install runtime dependencies (combined into single layer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # FFmpeg for video processing
     ffmpeg \
-    # OpenCV dependencies (libgl1 replaces deprecated libgl1-mesa-glx)
+    # OpenCV dependencies
     libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender1 \
     libgomp1 \
-    # For healthcheck and Node.js installation
+    # For healthcheck and downloads
     curl \
     gnupg \
-    # Fonts for caption rendering (viral-style subtitles)
+    # Fonts for caption rendering
     fonts-dejavu-core \
     fonts-liberation \
     fontconfig \
@@ -86,47 +78,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean \
-    # Refresh font cache for caption rendering
+    # Refresh font cache
     && fc-cache -fv
 
-# Install Node.js 20 LTS for yt-dlp YouTube extraction (required since late 2024)
-# Using NodeSource for a proper Node.js installation that yt-dlp can detect
+# Install Node.js 20 LTS (required for yt-dlp YouTube extraction)
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && node --version \
-    && which node
+    && node --version
 
-# Ensure 'node' command exists (symlink nodejs -> node if needed)
-RUN if [ ! -f /usr/bin/node ] && [ -f /usr/bin/nodejs ]; then ln -s /usr/bin/nodejs /usr/bin/node; fi
-
-# Verify node is executable
-RUN chmod +x /usr/bin/node || true
-
-# Install yt-dlp binary (standalone, doesn't require Python dependencies)
+# Install yt-dlp binary and Deno in single layer
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp
-
-# Install Deno (JS runtime for yt-dlp)
-ENV DENO_INSTALL="/usr/local"
-RUN curl -fsSL https://deno.land/install.sh | sh
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && curl -fsSL https://deno.land/install.sh | DENO_INSTALL="/usr/local" sh
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Copy virtual environment from builder (contains all Python packages)
+# Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
 
-# Create models directory for Haar cascades (bundled with OpenCV)
+# Create models directory
 RUN mkdir -p /app/models
 
-# Copy application code
+# Copy application code (this layer changes most often - keep at end)
 COPY app/ /app/app/
 
-# Create temp directory and set permissions
-RUN mkdir -p $TEMP_DIRECTORY && \
-    chown -R appuser:appuser $APP_HOME && \
-    chown -R appuser:appuser $TEMP_DIRECTORY
+# Set permissions
+RUN mkdir -p $TEMP_DIRECTORY \
+    && chown -R appuser:appuser $APP_HOME \
+    && chown -R appuser:appuser $TEMP_DIRECTORY
 
 # Switch to non-root user
 USER appuser
@@ -140,4 +121,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 # Start command
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
-
