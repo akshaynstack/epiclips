@@ -50,6 +50,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MEDIAPIPE_DISABLE_GPU=1 \
     CUDA_VISIBLE_DEVICES="" \
     CT2_FORCE_CPU=1 \
+    # HuggingFace cache for faster-whisper models
+    HF_HOME=/home/appuser/.cache/huggingface \
     YTDLP_NO_UPDATE=1 \
     MAX_WORKERS=4 \
     MAX_RENDER_WORKERS=3
@@ -84,8 +86,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
 
-# Create non-root user
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+# Create non-root user with home directory for model caching
+RUN groupadd -r appuser && useradd -r -g appuser -m -d /home/appuser appuser
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
